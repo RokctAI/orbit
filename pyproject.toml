@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "orbit-client"
+version = "0.1.0"
+description = "OSS client daemon for Gravity — install, connect, edit in any IDE"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "RokctAI", email = "admin@rokct.ai"}]
+
+dependencies = [
+    "click>=8.0",
+    "httpx>=0.25",
+    "watchdog>=3.0",
+]
+
+[project.scripts]
+orbit = "orbit.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["orbit*"]
