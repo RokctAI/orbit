@@ -1,0 +1,17 @@
+name: Code Quality
+permissions: write-all
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  lint:
+    uses: RokctAI/shared-workflows/.github/workflows/universal-linter.yml@main
+    with:
+      copyright-text: "Rokct Intelligence (pty) Ltd."
+    secrets: inherit

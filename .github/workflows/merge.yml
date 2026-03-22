@@ -1,0 +1,12 @@
+name: Auto Merge
+permissions: write-all
+
+on:
+  pull_request:
+
+jobs:
+  merge:
+    uses: RokctAI/shared-workflows/.github/workflows/universal-merge.yml@main
+    with:
+      allowed_users: 'RendaniSinyage, Rendani Sinyage, rokctbot, rokctbot[bot]'
+    secrets: inherit
