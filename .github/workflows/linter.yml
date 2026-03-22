@@ -1,4 +1,7 @@
 name: Code Quality
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 permissions: write-all
 
 on:
@@ -8,6 +11,12 @@ on:
   schedule:
     - cron: "0 0 * * *"
   workflow_dispatch:
+    inputs:
+      backfill_ai_notes_cutoff_version:
+        type: string
+        default: ""
+        description: "Regenerate AI release notes starting from this version (use 'all' for full history)"
+
 
 jobs:
   lint:

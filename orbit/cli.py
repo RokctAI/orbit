@@ -34,8 +34,12 @@ def cli():
 
 
 @cli.command()
-@click.option("--server", prompt="Gravity server URL", help="URL of the Gravity server")
-@click.option("--token", prompt="API token", hide_input=True, help="Authentication token")
+@click.option("--server", prompt="Gravity server URL",
+              help="URL of the Gravity server")
+@click.option("--token",
+              prompt="API token",
+              hide_input=True,
+              help="Authentication token")
 def login(server, token):
     """Authenticate with a Gravity server."""
     # Phase 2: validate token against server
@@ -49,7 +53,8 @@ def login(server, token):
 
 
 @cli.command()
-@click.option("--workspace", default="~/orbit", help="Local workspace directory")
+@click.option("--workspace", default="~/orbit",
+              help="Local workspace directory")
 def mount(workspace):
     """Fetch allowed repos → local workspace."""
     config = _load_orbit_config()
@@ -74,7 +79,9 @@ def status():
     click.echo("\n🛸 Orbit Status")
     if config.get("server"):
         click.echo(f"   Server: {config['server']}")
-        click.echo(f"   Auth: {'✅ configured' if config.get('token') else '❌ no token'}")
+        click.echo(
+            f"   Auth: {
+                '✅ configured' if config.get('token') else '❌ no token'}")
     else:
         click.echo("   Not connected. Run 'orbit login' first.")
 
