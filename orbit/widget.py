@@ -466,7 +466,10 @@ class TokenStatusWidget:
         self.workspace_btn.bind("<Button-1>", lambda e: self.select_workspace())
         self.workspace_btn.bind("<Enter>", lambda e: [self.on_enter(e), self.workspace_btn.configure(fg=self.fg_color)])
         self.workspace_btn.bind("<Leave>", lambda e: [self.on_leave(e), self.workspace_btn.configure(fg=self.accent_color)])
-            
+        
+        # Override token label click to handle calculation cancellation
+        self.token_label.bind("<Button-1>", self.on_token_click)
+             
         # Context menu
         self.menu = tk.Menu(self.root, tearoff=0, bg=self.hover_color, fg=self.fg_color, activebackground=self.accent_color, activeforeground=self.bg_color)
         self.update_menu()
@@ -525,6 +528,13 @@ class TokenStatusWidget:
             self.collapse_timer = self.root.after(10000, self.auto_collapse)
 
 
+
+    def on_token_click(self, event):
+        if self.is_updating:
+            self.cancel_calculation = True
+            self.token_label.configure(text="Canceling...")
+        else:
+            self.start_drag(event)
 
     def start_drag(self, event):
         self.drag_x = event.x
@@ -614,6 +624,7 @@ class TokenStatusWidget:
         if self.is_updating:
             return
         self.is_updating = True
+        self.cancel_calculation = False
         self.token_label.configure(text="Updating...")
         
         # Start worker thread to do heavy operations asynchronously
@@ -666,8 +677,13 @@ class TokenStatusWidget:
             workspace_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             
         def progress_callback(tokens, size_bytes, is_done):
+            # Check if calculation was canceled
+            was_canceled = getattr(self, "cancel_calculation", False)
+            
             # Format tokens neatly
-            if tokens >= 1_000_000:
+            if was_canceled:
+                tokens_str = "Canceled"
+            elif tokens >= 1_000_000:
                 tokens_str = f"{tokens / 1_000_000:.1f}M"
             elif tokens >= 1_000:
                 tokens_str = f"{tokens / 1_000:.1f}k"
@@ -682,11 +698,11 @@ class TokenStatusWidget:
             else:
                 size_str = f"{size_bytes} B"
                 
-            if not is_done:
+            if not is_done and not was_canceled:
                 tokens_str += "..."
                 
             # Schedule GUI updates on the main thread safely
-            self.root.after(0, self._apply_updates, online, tokens_str, size_str, is_done)
+            self.root.after(0, self._apply_updates, online, tokens_str, size_str, is_done or was_canceled)
             
         self._calculate_codebase_tokens(workspace_dir, progress_callback)
 
@@ -1163,10 +1179,14 @@ class TokenStatusWidget:
                 
         try:
             for root_dir, dirs, files in os.walk(workspace_path):
+                if getattr(self, "cancel_calculation", False):
+                    break
                 # Filter out ignored directories in-place
                 dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
                 
                 for file in files:
+                    if getattr(self, "cancel_calculation", False):
+                        break
                     ext = os.path.splitext(file)[1].lower()
                     if ext not in allowed_extensions:
                         continue
