@@ -338,8 +338,8 @@ class TokenStatusWidget:
         # Start initial async update after 30 seconds startup grace period
         self.root.after(30000, self.refresh)
         
-        # Start auto-update scheduler
-        self.schedule_auto_refresh()
+        # Start auto-update scheduler after initial delay
+        self.root.after(30000, self.schedule_auto_refresh)
         
         # Start blinking corner triangle loop after grace period
         self.blink_state = True
@@ -1048,8 +1048,9 @@ class TokenStatusWidget:
             row = tk.Frame(self.todo_list_frame, bg=self.hover_color, bd=0)
             row.pack(fill=tk.X, pady=2, padx=(0, 4))
             
-            # Double click gestures on row, bullet, or label toggles item status (returning break to prevent event propagation to root)
-            row.bind("<Double-Button-1>", lambda e, i=idx: [self.toggle_todo_item(i), "break"][1])
+            # Single click toggles status. Double click opens the Set Reminder dialog directly.
+            row.bind("<Button-1>", lambda e, i=idx: [self.toggle_todo_item(i), "break"][1])
+            row.bind("<Double-Button-1>", lambda e, i=idx: [self.set_reminder(i), "break"][1])
             
             # Checkbox indicator (☑️ for checked, ⚪ for unchecked)
             status_char = "☑️" if t.get("done") else "⚪"
@@ -1061,7 +1062,7 @@ class TokenStatusWidget:
             )
             chk.pack(side=tk.LEFT, padx=(8, 6))
             chk.bind("<Button-1>", lambda e, i=idx: [self.toggle_todo_item(i), "break"][1])
-            chk.bind("<Double-Button-1>", lambda e, i=idx: [self.toggle_todo_item(i), "break"][1])
+            chk.bind("<Double-Button-1>", lambda e, i=idx: [self.set_reminder(i), "break"][1])
             
             # Text label
             text_fg = "#585b79" if t.get("done") else self.fg_color
@@ -1071,8 +1072,8 @@ class TokenStatusWidget:
                 bg=self.hover_color, anchor="w", justify=tk.LEFT, cursor="hand2"
             )
             lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=4)
-            lbl.bind("<Button-1>", lambda e, i=idx: self.toggle_todo_item(i))
-            lbl.bind("<Double-Button-1>", lambda e, i=idx: [self.toggle_todo_item(i), "break"][1])
+            lbl.bind("<Button-1>", lambda e, i=idx: [self.toggle_todo_item(i), "break"][1])
+            lbl.bind("<Double-Button-1>", lambda e, i=idx: [self.set_reminder(i), "break"][1])
             
             # Yellow Bell Icon & Reminder Badge if present
             if t.get("due"):
