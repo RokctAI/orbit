@@ -1073,8 +1073,8 @@ class TokenStatusWidget:
             row = tk.Frame(self.todo_list_frame, bg=self.hover_color, bd=0)
             row.pack(fill=tk.X, pady=2, padx=(0, 4))
             
-            # Double click gestures to trigger reminders (returning break to prevent event propagation to root)
-            row.bind("<Double-Button-1>", lambda e, i=idx: [self.set_reminder(i), "break"][1])
+            # Double click gestures on row, bullet, or label toggles item status (returning break to prevent event propagation to root)
+            row.bind("<Double-Button-1>", lambda e, i=idx: [self.toggle_todo_item(i), "break"][1])
             
             # Checkbox indicator (Unicode symbols: ● for checked, ○ for unchecked)
             status_char = "●" if t.get("done") else "○"
@@ -1086,7 +1086,7 @@ class TokenStatusWidget:
             )
             chk.pack(side=tk.LEFT, padx=(6, 6))
             chk.bind("<Button-1>", lambda e, i=idx: self.toggle_todo_item(i))
-            chk.bind("<Double-Button-1>", lambda e, i=idx: [self.set_reminder(i), "break"][1])
+            chk.bind("<Double-Button-1>", lambda e, i=idx: [self.toggle_todo_item(i), "break"][1])
             
             # Text label
             text_fg = "#585b79" if t.get("done") else self.fg_color
@@ -1097,7 +1097,7 @@ class TokenStatusWidget:
             )
             lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=4)
             lbl.bind("<Button-1>", lambda e, i=idx: self.toggle_todo_item(i))
-            lbl.bind("<Double-Button-1>", lambda e, i=idx: [self.set_reminder(i), "break"][1])
+            lbl.bind("<Double-Button-1>", lambda e, i=idx: [self.toggle_todo_item(i), "break"][1])
             
             # Yellow Bell Icon & Reminder Badge if present
             if t.get("due"):
@@ -1106,6 +1106,7 @@ class TokenStatusWidget:
                     fg="#ffd700", bg=self.hover_color, cursor="hand2"
                 )
                 due_lbl.pack(side=tk.RIGHT, padx=6)
+                due_lbl.bind("<Button-1>", lambda e, i=idx: [self.set_reminder(i), "break"][1])
                 due_lbl.bind("<Double-Button-1>", lambda e, i=idx: [self.set_reminder(i), "break"][1])
                 
             # Styled Delete cross on hover
@@ -1228,6 +1229,18 @@ class TokenStatusWidget:
             except Exception:
                 pass
                 
+        # Load file tokens cache
+        cache_file = os.path.join(CONFIG_DIR, "file_tokens_cache.json")
+        file_cache = {}
+        if os.path.isfile(cache_file):
+            try:
+                with open(cache_file, "r") as f:
+                    file_cache = json.load(f)
+            except Exception:
+                pass
+                
+        new_file_cache = {}
+        
         # Scheduling: Calculate for 5 minutes, then sleep for 30 minutes
         last_break_time = time.time()
         
@@ -1244,13 +1257,17 @@ class TokenStatusWidget:
                     
                     # The cycle starts immediately. Calculate for 1 minute (60s) first, then sleep for 30 minutes (1800s),
                     # then wake up and calculate for 5 minutes (300s), sleep for 30 minutes (1800s), etc.
-                    # We track current calculation state and timing using a phase flag or checking limits.
                     current_time = time.time()
                     is_initial_phase = not getattr(self, "_calculation_started_cycle", False)
                     limit_time = 60.0 if is_initial_phase else 300.0
                     
                     if (current_time - last_break_time) > limit_time:
-                        # Sleep for 30 minutes (1800 seconds) in 1s intervals to check for cancellation
+                        # Save current state of cache before sleeping
+                        try:
+                            with open(cache_file, "w") as f:
+                                json.dump(new_file_cache, f, indent=2)
+                        except Exception:
+                            pass
                         for _ in range(1800):
                             if getattr(self, "cancel_calculation", False):
                                 break
@@ -1270,15 +1287,29 @@ class TokenStatusWidget:
                         if sz > 1_000_000: # 1MB limit
                             continue
                             
-                        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                            content = f.read()
-                            
-                        if encoding:
-                            total_tokens += len(encoding.encode(content))
+                        mtime = os.path.getmtime(file_path)
+                        
+                        # Check cache
+                        cached_entry = file_cache.get(file_path)
+                        if cached_entry and cached_entry.get("mtime") == mtime and cached_entry.get("size") == sz:
+                            toks = cached_entry.get("tokens", 0)
+                            new_file_cache[file_path] = cached_entry
                         else:
-                            # Standard estimation fallback
-                            total_tokens += len(content) // 4
+                            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                                content = f.read()
+                                
+                            if encoding:
+                                toks = len(encoding.encode(content))
+                            else:
+                                toks = len(content) // 4
+                                
+                            new_file_cache[file_path] = {
+                                "mtime": mtime,
+                                "size": sz,
+                                "tokens": toks
+                            }
                             
+                        total_tokens += toks
                         total_bytes += sz
                         file_count += 1
                         
@@ -1288,6 +1319,13 @@ class TokenStatusWidget:
                             update_callback(total_tokens, total_bytes, False)
                     except Exception:
                         pass
+        except Exception:
+            pass
+            
+        # Save updated cache on finish
+        try:
+            with open(cache_file, "w") as f:
+                json.dump(new_file_cache, f, indent=2)
         except Exception:
             pass
             
