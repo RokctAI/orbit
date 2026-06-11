@@ -341,9 +341,9 @@ class TokenStatusWidget:
         # Start auto-update scheduler
         self.schedule_auto_refresh()
         
-        # Start blinking corner triangle loop
+        # Start blinking corner triangle loop after grace period
         self.blink_state = True
-        self.run_blink_loop()
+        self.root.after(30000, self.run_blink_loop)
 
     def setup_ui(self):
         # Create container frame
@@ -1051,16 +1051,16 @@ class TokenStatusWidget:
             # Double click gestures on row, bullet, or label toggles item status (returning break to prevent event propagation to root)
             row.bind("<Double-Button-1>", lambda e, i=idx: [self.toggle_todo_item(i), "break"][1])
             
-            # Checkbox indicator (Unicode symbols: ● for checked, ○ for unchecked)
-            status_char = "●" if t.get("done") else "○"
-            status_color = self.accent_color if t.get("done") else self.fg_color
+            # Checkbox indicator (☑️ for checked, ⚪ for unchecked)
+            status_char = "☑️" if t.get("done") else "⚪"
+            status_fg = self.accent_color if t.get("done") else self.fg_color
             
             chk = tk.Label(
-                row, text=status_char, font=("Segoe UI", 11), 
-                fg=status_color, bg=self.hover_color, cursor="hand2"
+                row, text=status_char, font=("Segoe UI", 10), 
+                fg=status_fg, bg=self.hover_color, cursor="hand2"
             )
-            chk.pack(side=tk.LEFT, padx=(6, 6))
-            chk.bind("<Button-1>", lambda e, i=idx: self.toggle_todo_item(i))
+            chk.pack(side=tk.LEFT, padx=(8, 6))
+            chk.bind("<Button-1>", lambda e, i=idx: [self.toggle_todo_item(i), "break"][1])
             chk.bind("<Double-Button-1>", lambda e, i=idx: [self.toggle_todo_item(i), "break"][1])
             
             # Text label
