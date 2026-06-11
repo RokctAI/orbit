@@ -311,16 +311,22 @@ class TokenStatusWidget:
         self.root.geometry(f"{self.width}x{self.height}+{start_x}+{start_y}")
         
         # State
-        self.tokens_str = "Calculating..."
+        self.tokens_str = "..."
         self.size_str = "0 B"
         self.is_online = False
         self.is_updating = False
-        self.country_code = ""
+        
+        # Load cached country code from config to prevent lookup delay
+        config = load_orbit_config()
+        self.country_code = config.get("country_code", "")
+        
         self.logged_in = False
         self.is_compact = True
         self.collapse_timer = None
         self.todo_expanded = False
         self.todo_height = 180
+        self._prev_todo_expanded = False
+        self.original_y = None # Track the position of the widget before expanding todo
         
         # Build layout UI
         self.setup_ui()
@@ -638,7 +644,7 @@ class TokenStatusWidget:
         # 1. Check Internet and Server Status
         online = self._check_connection()
         
-        # 2. Fetch country code and flag image if online
+        # 2. Fetch country code and flag image if online (cached locally after first fetch)
         if online:
             if not self.country_code:
                 try:
@@ -647,6 +653,11 @@ class TokenStatusWidget:
                     with urllib.request.urlopen(req, timeout=3.0) as response:
                         data = json.loads(response.read().decode())
                         self.country_code = data.get("countryCode", "").lower()
+                        if self.country_code:
+                            # Save to config cache
+                            config = load_orbit_config()
+                            config["country_code"] = self.country_code
+                            save_orbit_config(config)
                 except Exception:
                     pass
             
@@ -684,7 +695,7 @@ class TokenStatusWidget:
             if was_canceled:
                 tokens_str = "Canceled"
             elif tokens >= 1_000_000:
-                tokens_str = f"{tokens / 1_000_000:.1f}M"
+                tokens_str = f"{tokens / 1_000_000:.2f}M"
             elif tokens >= 1_000:
                 tokens_str = f"{tokens / 1_000:.1f}k"
             else:
@@ -714,12 +725,30 @@ class TokenStatusWidget:
         self.update_layout(is_done=is_done)
 
     def update_layout(self, is_done=True):
-        # If this is a partial update during scanning, only update the token label text
+        # If this is a partial update during scanning, only update the token label text and adjust geometry width (no repacking)
         if not is_done:
             if self.is_compact:
                 self.token_label.configure(text=f"{self.tokens_str} ({self.size_str.replace(' ', '')})")
             else:
                 self.token_label.configure(text=f"Tokens: {self.tokens_str} ({self.size_str})")
+                
+            self.root.update_idletasks()
+            new_width = self.main_frame.winfo_reqwidth() + 20
+            if self.todo_expanded and hasattr(self, "todo_frame"):
+                new_width = max(new_width, self.todo_frame.winfo_reqwidth() + 20)
+                
+            target_height = self.height + self.todo_height if self.todo_expanded else self.height
+            curr_x = self.root.winfo_x()
+            curr_y = self.root.winfo_y()
+            old_width = self.root.winfo_width()
+            
+            new_x = curr_x
+            if old_width > 1:
+                screen_w = self.root.winfo_screenwidth()
+                if curr_x + (old_width / 2) > (screen_w / 2):
+                    new_x = curr_x - (new_width - old_width)
+                    
+            self.root.geometry(f"{new_width}x{target_height}+{new_x}+{curr_y}")
             return
             
         try:
@@ -807,10 +836,26 @@ class TokenStatusWidget:
             
         target_height = self.height + self.todo_height if self.todo_expanded else self.height
         
-        # Preserve position coordinates while adapting window geometry
+        # Preserve position coordinates while adapting window geometry (upwards/downwards expansion)
         curr_x = self.root.winfo_x()
         curr_y = self.root.winfo_y()
         old_width = self.root.winfo_width()
+        
+        # Shift Y coordinate correctly during Todo toggle transitions to expand upwards and collapse back
+        new_y = curr_y
+        if self.todo_expanded:
+            if not getattr(self, "_prev_todo_expanded", False):
+                self.original_y = curr_y
+                new_y = curr_y - self.todo_height
+        else:
+            if getattr(self, "_prev_todo_expanded", False):
+                if getattr(self, "original_y", None) is not None:
+                    new_y = self.original_y
+                    self.original_y = None
+                else:
+                    new_y = curr_y + self.todo_height
+                
+        self._prev_todo_expanded = self.todo_expanded
         
         # Adjust X based on screen half (anchor right if on the right half, left if on the left half)
         new_x = curr_x
@@ -821,7 +866,7 @@ class TokenStatusWidget:
             else:
                 new_x = curr_x
             
-        self.root.geometry(f"{new_width}x{target_height}+{new_x}+{curr_y}")
+        self.root.geometry(f"{new_width}x{target_height}+{new_x}+{new_y}")
         
         # Dynamically adjust menu depending on login state
         self.update_menu()
@@ -1177,6 +1222,9 @@ class TokenStatusWidget:
             except Exception:
                 pass
                 
+        # Scheduling: Calculate for 5 minutes, then sleep for 30 minutes
+        last_break_time = time.time()
+        
         try:
             for root_dir, dirs, files in os.walk(workspace_path):
                 if getattr(self, "cancel_calculation", False):
@@ -1187,6 +1235,20 @@ class TokenStatusWidget:
                 for file in files:
                     if getattr(self, "cancel_calculation", False):
                         break
+                    
+                    # Initial pause and subsequent pauses: sleep for 30 minutes (1800s) before start / after 5 minutes of calculation.
+                    # We start by sleeping 30 minutes, then calculate for 5 minutes, then sleep 30 minutes, etc.
+                    # Since we want it to sleep 30 minutes first, let's check current time against last_break_time.
+                    # On the very first file (file_count == 0), or if 5 minutes have elapsed, we sleep for 30 minutes.
+                    current_time = time.time()
+                    if file_count == 0 or (current_time - last_break_time) > 300.0:
+                        # Sleep 30 minutes (1800 seconds) checking for cancellation every 1s
+                        for _ in range(1800):
+                            if getattr(self, "cancel_calculation", False):
+                                break
+                            time.sleep(1.0)
+                        last_break_time = time.time()
+                        
                     ext = os.path.splitext(file)[1].lower()
                     if ext not in allowed_extensions:
                         continue
