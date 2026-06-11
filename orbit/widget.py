@@ -311,13 +311,13 @@ class TokenStatusWidget:
         self.root.geometry(f"{self.width}x{self.height}+{start_x}+{start_y}")
         
         # State
-        self.tokens_str = "..."
-        self.size_str = "0 B"
+        config = load_orbit_config()
+        self.tokens_str = config.get("cached_tokens_str", "...")
+        self.size_str = config.get("cached_size_str", "0 B")
         self.is_online = False
         self.is_updating = False
         
         # Load cached country code from config to prevent lookup delay
-        config = load_orbit_config()
         self.country_code = config.get("country_code", "")
         
         self.logged_in = False
@@ -719,6 +719,12 @@ class TokenStatusWidget:
         self.is_online = online
         self.tokens_str = tokens_str
         self.size_str = size_str
+        
+        # Cache token counts and sizes to configuration to persist across widget launches
+        config = load_orbit_config()
+        config["cached_tokens_str"] = tokens_str
+        config["cached_size_str"] = size_str
+        save_orbit_config(config)
         
         self.update_layout(is_done=is_done)
 
