@@ -327,6 +327,7 @@ class TokenStatusWidget:
         self.todo_height = 180
         self._prev_todo_expanded = False
         self.original_y = None # Track the position of the widget before expanding todo
+        self._calculation_started_cycle = False
         
         # Build layout UI
         self.setup_ui()
@@ -1236,18 +1237,21 @@ class TokenStatusWidget:
                     if getattr(self, "cancel_calculation", False):
                         break
                     
-                    # Initial pause and subsequent pauses: sleep for 30 minutes (1800s) before start / after 5 minutes of calculation.
-                    # We start by sleeping 30 minutes, then calculate for 5 minutes, then sleep 30 minutes, etc.
-                    # Since we want it to sleep 30 minutes first, let's check current time against last_break_time.
-                    # On the very first file (file_count == 0), or if 5 minutes have elapsed, we sleep for 30 minutes.
+                    # The cycle starts immediately. Calculate for 1 minute (60s) first, then sleep for 30 minutes (1800s),
+                    # then wake up and calculate for 5 minutes (300s), sleep for 30 minutes (1800s), etc.
+                    # We track current calculation state and timing using a phase flag or checking limits.
                     current_time = time.time()
-                    if file_count == 0 or (current_time - last_break_time) > 300.0:
-                        # Sleep 30 minutes (1800 seconds) checking for cancellation every 1s
+                    is_initial_phase = not getattr(self, "_calculation_started_cycle", False)
+                    limit_time = 60.0 if is_initial_phase else 300.0
+                    
+                    if (current_time - last_break_time) > limit_time:
+                        # Sleep for 30 minutes (1800 seconds) in 1s intervals to check for cancellation
                         for _ in range(1800):
                             if getattr(self, "cancel_calculation", False):
                                 break
                             time.sleep(1.0)
                         last_break_time = time.time()
+                        self._calculation_started_cycle = True
                         
                     ext = os.path.splitext(file)[1].lower()
                     if ext not in allowed_extensions:
