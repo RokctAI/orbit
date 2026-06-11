@@ -635,7 +635,6 @@ class TokenStatusWidget:
             return
         self.is_updating = True
         self.cancel_calculation = False
-        self.token_label.configure(text="Updating...")
         
         # Start worker thread to do heavy operations asynchronously
         threading.Thread(target=self._update_worker, daemon=True).start()
@@ -1074,8 +1073,8 @@ class TokenStatusWidget:
             row = tk.Frame(self.todo_list_frame, bg=self.hover_color, bd=0)
             row.pack(fill=tk.X, pady=2, padx=(0, 4))
             
-            # Double click gestures to trigger reminders
-            row.bind("<Double-Button-1>", lambda e, i=idx: self.set_reminder(i))
+            # Double click gestures to trigger reminders (returning break to prevent event propagation to root)
+            row.bind("<Double-Button-1>", lambda e, i=idx: [self.set_reminder(i), "break"][1])
             
             # Checkbox indicator (Unicode symbols: ● for checked, ○ for unchecked)
             status_char = "●" if t.get("done") else "○"
@@ -1087,7 +1086,7 @@ class TokenStatusWidget:
             )
             chk.pack(side=tk.LEFT, padx=(6, 6))
             chk.bind("<Button-1>", lambda e, i=idx: self.toggle_todo_item(i))
-            chk.bind("<Double-Button-1>", lambda e, i=idx: self.set_reminder(i))
+            chk.bind("<Double-Button-1>", lambda e, i=idx: [self.set_reminder(i), "break"][1])
             
             # Text label
             text_fg = "#585b79" if t.get("done") else self.fg_color
@@ -1098,7 +1097,7 @@ class TokenStatusWidget:
             )
             lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=4)
             lbl.bind("<Button-1>", lambda e, i=idx: self.toggle_todo_item(i))
-            lbl.bind("<Double-Button-1>", lambda e, i=idx: self.set_reminder(i))
+            lbl.bind("<Double-Button-1>", lambda e, i=idx: [self.set_reminder(i), "break"][1])
             
             # Yellow Bell Icon & Reminder Badge if present
             if t.get("due"):
@@ -1107,7 +1106,7 @@ class TokenStatusWidget:
                     fg="#ffd700", bg=self.hover_color, cursor="hand2"
                 )
                 due_lbl.pack(side=tk.RIGHT, padx=6)
-                due_lbl.bind("<Double-Button-1>", lambda e, i=idx: self.set_reminder(i))
+                due_lbl.bind("<Double-Button-1>", lambda e, i=idx: [self.set_reminder(i), "break"][1])
                 
             # Styled Delete cross on hover
             del_btn = tk.Label(
