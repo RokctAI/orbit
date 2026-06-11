@@ -1294,10 +1294,60 @@ class TokenStatusWidget:
 
 
 def run_widget():
-    # Force Tkinter thread support initialization
+    # Single instance lock using a TCP socket
+    lock_port = 49999
+    
+    # Try to connect to existing instance to tell it to shut down
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        s.connect(("127.0.0.1", lock_port))
+        s.sendall(b"EXIT")
+        s.close()
+        # Give the older instance a moment to exit
+        time.sleep(0.5)
+    except Exception:
+        pass
+
+    # Now bind to the lock port as the primary instance
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        server_socket.bind(("127.0.0.1", lock_port))
+        server_socket.listen(1)
+        server_socket.setblocking(False)
+    except Exception:
+        # If port binding still fails, another instance is actively running and refusing to exit
+        sys.exit(0)
+
     root = tk.Tk()
     app = TokenStatusWidget(root)
-    root.mainloop()
+
+    # Listen for shutdown signals on the lock port
+    def check_instance_socket():
+        try:
+            conn, addr = server_socket.accept()
+            msg = conn.recv(1024)
+            if b"EXIT" in msg:
+                conn.close()
+                server_socket.close()
+                root.destroy()
+                return
+            conn.close()
+        except BlockingIOError:
+            pass
+        except Exception:
+            pass
+        root.after(500, check_instance_socket)
+
+    root.after(500, check_instance_socket)
+    
+    try:
+        root.mainloop()
+    finally:
+        try:
+            server_socket.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
