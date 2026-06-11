@@ -710,9 +710,6 @@ class TokenStatusWidget:
             else:
                 size_str = f"{size_bytes} B"
                 
-            if not is_done and not was_canceled:
-                tokens_str += "..."
-                
             # Schedule GUI updates on the main thread safely
             self.root.after(0, self._apply_updates, online, tokens_str, size_str, is_done or was_canceled)
             
