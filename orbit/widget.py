@@ -423,12 +423,22 @@ class TokenStatusWidget:
         # Right: Tokens display
         self.token_label = tk.Label(
             self.main_frame,
-            text="Tokens: ...",
-            font=("Segoe UI", 9) if sys.platform == "win32" else ("SF Pro Text", 10),
+            text="...",
+            font=("Segoe UI", 9, "bold") if sys.platform == "win32" else ("SF Pro Text", 10, "bold"),
             fg=self.fg_color,
             bg=self.bg_color
         )
         self.token_label.pack(side=tk.LEFT)
+        
+        # Delta label to show (+X or -Y) in custom color
+        self.delta_label = tk.Label(
+            self.main_frame,
+            text="",
+            font=("Segoe UI", 8, "bold") if sys.platform == "win32" else ("SF Pro Text", 9, "bold"),
+            fg="#fab387", # Sleek peach/orange color for local additions/removals
+            bg=self.bg_color
+        )
+        self.delta_label.pack(side=tk.LEFT, padx=(4, 0))
         
         # Far Right: Close cross button
         self.close_btn = tk.Label(
@@ -772,28 +782,86 @@ class TokenStatusWidget:
             
         brand = "Orbit"
         
+        # Fetch remote metadata tokens to calculate additions/removals delta
+        remote_tokens = config.get("gravity_remote_tokens", 0) # Default to 0 if not loaded from Gravity fetch yet
+        
+        # Strip string suffix to get local token number approximation
+        try:
+            local_tokens = 0
+            if "M" in self.tokens_str:
+                local_tokens = int(float(self.tokens_str.replace("M", "")) * 1_000_000)
+            elif "k" in self.tokens_str:
+                local_tokens = int(float(self.tokens_str.replace("k", "")) * 1_000)
+            else:
+                local_tokens = int(self.tokens_str.replace("...", "0").replace("Canceled", "0"))
+        except Exception:
+            local_tokens = 0
+
+        # Calculate difference (local tokens compared to remote gravity metadata baseline)
+        delta_tokens = local_tokens - remote_tokens if remote_tokens > 0 else 0
+        delta_str = ""
+        delta_color = "#fab387" # Standard peach
+        if delta_tokens > 0:
+            if delta_tokens >= 1_000_000:
+                delta_str = f"+{delta_tokens / 1_000_000:.2f}M"
+            elif delta_tokens >= 1_000:
+                delta_str = f"+{delta_tokens / 1_000:.1f}k"
+            else:
+                delta_str = f"+{delta_tokens}"
+            delta_color = "#a6e3a1" # Vibrant green for additions
+        elif delta_tokens < 0:
+            abs_delta = abs(delta_tokens)
+            if abs_delta >= 1_000_000:
+                delta_str = f"-{abs_delta / 1_000_000:.2f}M"
+            elif abs_delta >= 1_000:
+                delta_str = f"-{abs_delta / 1_000:.1f}k"
+            else:
+                delta_str = f"-{abs_delta}"
+            delta_color = "#f38ba8" # Vibrant red for removals
+
+        # Render display: show remote baseline tokens (Gravity metadata baseline) if it exists, otherwise local tokens count
+        base_display = ""
+        if remote_tokens > 0:
+            if remote_tokens >= 1_000_000:
+                base_display = f"{remote_tokens / 1_000_000:.2f}M"
+            elif remote_tokens >= 1_000:
+                base_display = f"{remote_tokens / 1_000:.1f}k"
+            else:
+                base_display = str(remote_tokens)
+        else:
+            base_display = self.tokens_str
+
+        # Clear delta label packing in update_layout forget block
+        self.delta_label.pack_forget()
+
         if self.is_compact:
-            # Compact Layout: Brand Name configured
+            # Compact Layout
             self.app_label.configure(text=brand)
             self.sep_label1.pack_forget()
-            self.token_label.configure(text=f"{self.tokens_str} ({self.size_str.replace(' ', '')})")
+            self.token_label.configure(text=f"{base_display} ({self.size_str.replace(' ', '')})")
             self.token_label.pack(side=tk.LEFT)
+            if delta_str:
+                self.delta_label.configure(text=delta_str, fg=delta_color)
+                self.delta_label.pack(side=tk.LEFT, padx=(4, 0))
         else:
             # Expanded Layout
             if self.logged_in:
                 self.app_label.configure(text=f"{brand} ({self.username})")
                 self.logout_btn.pack(side=tk.LEFT, padx=(0, 4))
             else:
-                self.app_label.configure(text=brand)  # Never show Guest text
+                self.app_label.configure(text=brand)
                 if not workspace_set:
                     self.workspace_btn.pack(side=tk.LEFT, padx=(0, 4))
                 else:
                     self.login_btn.pack(side=tk.LEFT, padx=(0, 4))
                     
-            # Repack separator and token/size display in expanded layout
+            # Repack separator and display
             self.sep_label1.pack(side=tk.LEFT, padx=6)
-            self.token_label.configure(text=f"Tokens: {self.tokens_str} ({self.size_str})")
+            self.token_label.configure(text=f"{base_display} ({self.size_str})")
             self.token_label.pack(side=tk.LEFT)
+            if delta_str:
+                self.delta_label.configure(text=delta_str, fg=delta_color)
+                self.delta_label.pack(side=tk.LEFT, padx=(4, 0))
             
         # Ensure status indicator line stays on top of brand badge child elements
         self.status_line.lift()
