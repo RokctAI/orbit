@@ -731,31 +731,6 @@ class TokenStatusWidget:
         self.update_layout(is_done=is_done)
 
     def update_layout(self, is_done=True):
-        # If this is a partial update during scanning, only update the token label text and adjust geometry width (no repacking)
-        if not is_done:
-            if self.is_compact:
-                self.token_label.configure(text=f"{self.tokens_str} ({self.size_str.replace(' ', '')})")
-            else:
-                self.token_label.configure(text=f"Tokens: {self.tokens_str} ({self.size_str})")
-                
-            self.root.update_idletasks()
-            new_width = self.main_frame.winfo_reqwidth() + 20
-            if self.todo_expanded and hasattr(self, "todo_frame"):
-                new_width = max(new_width, self.todo_frame.winfo_reqwidth() + 20)
-                
-            target_height = self.height + self.todo_height if self.todo_expanded else self.height
-            curr_x = self.root.winfo_x()
-            curr_y = self.root.winfo_y()
-            old_width = self.root.winfo_width()
-            
-            new_x = curr_x
-            if old_width > 1:
-                screen_w = self.root.winfo_screenwidth()
-                if curr_x + (old_width / 2) > (screen_w / 2):
-                    new_x = curr_x - (new_width - old_width)
-                    
-            self.root.geometry(f"{new_width}x{target_height}+{new_x}+{curr_y}")
-            return
             
         try:
             bg = self.brand_badge.cget("bg")
@@ -1313,8 +1288,8 @@ class TokenStatusWidget:
                         total_bytes += sz
                         file_count += 1
                         
-                        # Yield CPU to prevent lagging: sleep 10 milliseconds every 100 files
-                        if file_count % 100 == 0:
+                        # Yield CPU to prevent lagging: sleep 10 milliseconds every 500 files
+                        if file_count % 500 == 0:
                             time.sleep(0.01)
                             update_callback(total_tokens, total_bytes, False)
                     except Exception:
