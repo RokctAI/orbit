@@ -15,7 +15,9 @@ dependencies = [
     "click>=8.0",
     "httpx>=0.25",
     "watchdog>=3.0",
+    "tiktoken>=0.5.0",
 ]
+
 
 [project.scripts]
 orbit = "orbit.cli:cli"

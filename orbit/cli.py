@@ -81,5 +81,15 @@ def status():
     click.echo("")
 
 
+@cli.command()
+def widget():
+    """Launch the floating minimal status bar widget."""
+    click.echo("Launching Orbit Status Bar Widget...")
+    from orbit.widget import run_widget
+    run_widget()
+
+
+
 if __name__ == "__main__":
     cli()
+
