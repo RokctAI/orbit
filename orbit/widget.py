@@ -335,8 +335,8 @@ class TokenStatusWidget:
         # Interaction events
         self.setup_events()
         
-        # Start initial async update
-        self.refresh()
+        # Start initial async update after 30 seconds startup grace period
+        self.root.after(30000, self.refresh)
         
         # Start auto-update scheduler
         self.schedule_auto_refresh()
@@ -623,8 +623,11 @@ class TokenStatusWidget:
 
     def schedule_auto_refresh(self):
         # Auto refresh using interval from theme config
-        self.root.after(self.refresh_interval, self.schedule_auto_refresh)
+        self.root.after(self.refresh_interval, self.refresh_and_reschedule)
+
+    def refresh_and_reschedule(self):
         self.refresh()
+        self.root.after(self.refresh_interval, self.refresh_and_reschedule)
 
 
     def refresh(self):
