@@ -76,6 +76,27 @@ class OrbitHTTPRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
+def load_baseline_snapshot() -> dict:
+    baseline_file = os.path.join(CONFIG_DIR, "baseline_snapshot.json")
+    if os.path.isfile(baseline_file):
+        try:
+            with open(baseline_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_baseline_snapshot(snapshot: dict):
+    baseline_file = os.path.join(CONFIG_DIR, "baseline_snapshot.json")
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    try:
+        with open(baseline_file, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2)
+    except Exception:
+        pass
+
+
 def load_orbit_config() -> dict:
     if os.path.isfile(CONFIG_FILE):
         try:
@@ -249,6 +270,11 @@ class TokenStatusWidget:
         self.chrome_data = {}
         self.net_expanded = False
         self.net_height = 220
+        
+        # Local changes tracking state
+        self.pending_changes = []
+        self.changes_expanded = False
+        self.changes_height = 200
         
         # Get system username
         try:
@@ -463,7 +489,7 @@ class TokenStatusWidget:
             w.bind("<B1-Motion>", self.drag)
             w.bind("<ButtonRelease-1>", self.end_drag)
             if w in (self.brand_badge, self.app_label, self.status_line, self.cc_label):
-                w.bind("<Double-Button-1>", self.toggle_todo_list)
+                w.bind("<Double-Button-1>", self.toggle_changes_panel)
             else:
                 w.bind("<Double-Button-1>", self.toggle_compact)
             
@@ -554,6 +580,8 @@ class TokenStatusWidget:
     def start_drag(self, event):
         self.drag_x = event.x
         self.drag_y = event.y
+        self.drag_start_x = event.x_root
+        self.drag_start_y = event.y_root
 
     def drag(self, event):
         # Calculate coordinate delta and move window
@@ -562,6 +590,14 @@ class TokenStatusWidget:
         self.root.geometry(f"+{x}+{y}")
 
     def end_drag(self, event):
+        dx = abs(event.x_root - getattr(self, "drag_start_x", event.x_root))
+        dy = abs(event.y_root - getattr(self, "drag_start_y", event.y_root))
+        if dx < 5 and dy < 5:
+            if event.widget in (self.brand_badge, self.app_label, self.status_line, self.cc_label):
+                if getattr(self, "pending_changes", []):
+                    self.orbit_push()
+                    return
+        
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
         curr_x = self.root.winfo_x()
@@ -688,6 +724,10 @@ class TokenStatusWidget:
             self.root.after(0, self._apply_updates, tokens_str, size_str, is_done or was_canceled)
             
         self._calculate_codebase_tokens(workspace_dir, progress_callback)
+        try:
+            self._detect_changes(workspace_dir)
+        except Exception:
+            pass
 
     def _apply_updates(self, tokens_str, size_str, is_done=True):
         self.tokens_str = tokens_str
@@ -730,7 +770,16 @@ class TokenStatusWidget:
             self.cc_label.configure(text=self.country_code.upper())
             self.cc_label.pack(side=tk.LEFT, anchor=tk.N, pady=(4, 0))
             
-        brand = "Orbit"
+        if getattr(self, "pending_changes", []):
+            brand = "Push"
+            badge_bg = "#228B22"  # Forest Green
+        else:
+            brand = "Orbit"
+            badge_bg = "#ff4600"  # Orange
+            
+        self.brand_badge.configure(bg=badge_bg)
+        self.app_label.configure(bg=badge_bg)
+        self.cc_label.configure(bg=badge_bg)
         
         # Fetch remote metadata tokens to calculate additions/removals delta
         remote_tokens = config.get("gravity_remote_tokens", 0) # Default to 0 if not loaded from Gravity fetch yet
@@ -832,15 +881,15 @@ class TokenStatusWidget:
                 self.delta_label.configure(text=delta_str, fg=delta_color)
                 self.delta_label.pack(side=tk.LEFT, padx=(4, 0))
             
-        # Determine stable width depending on state (login/todo/net expansion vs normal/compact)
-        if self.login_expanded or self.todo_expanded or self.net_expanded:
+        # Determine stable width depending on state (login/todo/net/changes expansion vs normal/compact)
+        if self.login_expanded or self.todo_expanded or self.net_expanded or self.changes_expanded:
             new_width = 300
         else:
             new_width = 260
             
         # Re-pack self.main_frame and set heights depending on expanded todo state
         self.main_frame.pack_forget()
-        if self.todo_expanded or self.login_expanded or self.net_expanded:
+        if self.todo_expanded or self.login_expanded or self.net_expanded or self.changes_expanded:
             self.main_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=(0, 8), pady=0)
         else:
             self.main_frame.pack(fill=tk.BOTH, expand=True, padx=(0, 8), pady=0)
@@ -854,6 +903,8 @@ class TokenStatusWidget:
             target_height = self.height + self.login_height
         elif self.net_expanded:
             target_height = self.height + self.net_height
+        elif self.changes_expanded:
+            target_height = self.height + self.changes_height
         else:
             target_height = self.height
         
@@ -897,6 +948,8 @@ class TokenStatusWidget:
         else:
             self.menu.add_command(label="Change Workspace...", command=self.select_workspace)
             self.menu.add_command(label="Clear Workspace", command=self.clear_workspace)
+            self.menu.add_command(label="Toggle Tasks List", command=self.toggle_todo_list)
+            self.menu.add_command(label="Toggle Changes Panel", command=self.toggle_changes_panel)
             
         if config.get("token"):
             self.menu.add_command(label="Logout", command=self.logout)
@@ -1520,6 +1573,109 @@ class TokenStatusWidget:
         update_callback(total_tokens, total_bytes, True)
         return total_tokens, total_bytes
 
+    def _detect_changes(self, workspace_path: str):
+        import hashlib
+        import difflib
+        
+        # Ignored directories
+        ignore_dirs = {
+            ".git", ".rokct", ".venv", "venv", "env", "__pycache__", 
+            "node_modules", "dist", "build", ".next", ".cache", "out",
+            "target", "bin", "obj", "ios", "android", ".expo", ".output",
+            "logs", "temp", "tmp", "coverage"
+        }
+        allowed_extensions = {
+            ".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".css", 
+            ".json", ".md", ".toml", ".yaml", ".yml", ".txt", ".ini"
+        }
+        
+        baseline = load_baseline_snapshot()
+        
+        # Compute current files snapshot
+        current_snapshot = {}
+        for root_dir, dirs, files in os.walk(workspace_path):
+            dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
+            for file in files:
+                ext = os.path.splitext(file)[1].lower()
+                if ext not in allowed_extensions:
+                    continue
+                file_path = os.path.join(root_dir, file)
+                rel_path = os.path.relpath(file_path, workspace_path).replace("\\", "/")
+                
+                try:
+                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+                    lines = content.splitlines()
+                    
+                    hasher = hashlib.sha256()
+                    hasher.update(content.encode("utf-8"))
+                    file_hash_val = hasher.hexdigest()
+                    
+                    current_snapshot[rel_path] = {
+                        "hash": file_hash_val,
+                        "lines": lines,
+                        "content": content
+                    }
+                except Exception:
+                    pass
+                    
+        # If baseline is empty, initialize it to prevent showing all files as added on first run
+        if not baseline:
+            init_baseline = {}
+            for rel_path, data in current_snapshot.items():
+                init_baseline[rel_path] = {
+                    "hash": data["hash"],
+                    "lines": data["lines"]
+                }
+            save_baseline_snapshot(init_baseline)
+            self.pending_changes = []
+            return
+
+        # Compare and calculate diffs
+        changes = []
+        
+        # 1. Added and Modified files
+        for rel_path, curr_data in current_snapshot.items():
+            base_data = baseline.get(rel_path)
+            if not base_data:
+                additions = len(curr_data["lines"])
+                changes.append({
+                    "path": rel_path,
+                    "type": "added",
+                    "additions": additions,
+                    "deletions": 0,
+                    "content": curr_data["content"]
+                })
+            elif base_data["hash"] != curr_data["hash"]:
+                base_lines = base_data.get("lines", [])
+                curr_lines = curr_data["lines"]
+                
+                diff = list(difflib.ndiff(base_lines, curr_lines))
+                additions = sum(1 for line in diff if line.startswith("+ "))
+                deletions = sum(1 for line in diff if line.startswith("- "))
+                
+                changes.append({
+                    "path": rel_path,
+                    "type": "modified",
+                    "additions": additions,
+                    "deletions": deletions,
+                    "content": curr_data["content"]
+                })
+                
+        # 2. Deleted files
+        for rel_path, base_data in baseline.items():
+            if rel_path not in current_snapshot:
+                deletions = len(base_data.get("lines", []))
+                changes.append({
+                    "path": rel_path,
+                    "type": "deleted",
+                    "additions": 0,
+                    "deletions": deletions,
+                    "content": ""
+                })
+                
+        self.pending_changes = changes
+
     def start_http_server(self):
         def run_server():
             server_address = ('127.0.0.1', 49998)
@@ -1658,6 +1814,230 @@ class TokenStatusWidget:
             
             lbl_size = tk.Label(d_row, text=fmt(size), font=("Segoe UI", 8), fg=self.fg_color, bg=d_row.cget("bg"))
             lbl_size.pack(side=tk.RIGHT, padx=4)
+
+    def toggle_changes_panel(self, event=None):
+        self.changes_expanded = not self.changes_expanded
+        if self.collapse_timer:
+            self.root.after_cancel(self.collapse_timer)
+            self.collapse_timer = None
+            
+        if self.changes_expanded:
+            self.is_compact = False
+            # Collapse other panels
+            if self.todo_expanded:
+                self.toggle_todo_list()
+            if self.login_expanded:
+                self.toggle_login_expansion()
+            if self.net_expanded:
+                self.toggle_net_panel()
+                
+            if not hasattr(self, "changes_frame"):
+                self.setup_changes_ui()
+            self.changes_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self.refresh_changes_list()
+        else:
+            if hasattr(self, "changes_frame"):
+                self.changes_frame.pack_forget()
+                
+        self.update_layout()
+        return "break"
+
+    def setup_changes_ui(self):
+        self.changes_frame = tk.Frame(self.root, bg=self.bg_color, bd=0)
+        
+        # Header title for changes
+        header_frame = tk.Frame(self.changes_frame, bg=self.bg_color)
+        header_frame.pack(fill=tk.X, padx=10, pady=(8, 2))
+        
+        tk.Label(
+            header_frame, text="Pending Changes",
+            font=("Segoe UI", 9, "bold") if sys.platform == "win32" else ("SF Pro Text", 10, "bold"),
+            fg=self.accent_color, bg=self.bg_color
+        ).pack(side=tk.LEFT)
+        
+        self.changes_total_lbl = tk.Label(
+            header_frame, text="-- files",
+            font=("Segoe UI", 7) if sys.platform == "win32" else ("SF Pro Text", 8),
+            fg="#585b79", bg=self.bg_color
+        )
+        self.changes_total_lbl.pack(side=tk.RIGHT)
+        
+        # Scrollable Canvas
+        self.changes_canvas = tk.Canvas(self.changes_frame, bg=self.bg_color, bd=0, highlightthickness=0)
+        self.changes_scrollbar = tk.Scrollbar(self.changes_frame, orient="vertical", command=self.changes_canvas.yview, width=6, bd=0, elementborderwidth=0)
+        self.changes_list_frame = tk.Frame(self.changes_canvas, bg=self.bg_color)
+        
+        self.changes_canvas.create_window((0, 0), window=self.changes_list_frame, anchor="nw", tags="self.changes_list_frame")
+        self.changes_canvas.configure(yscrollcommand=self.changes_scrollbar.set)
+        
+        self.changes_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=(10, 0), pady=2)
+        self.changes_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(2, 4))
+        
+        self.changes_canvas.bind("<Configure>", lambda e: self.changes_canvas.itemconfig("self.changes_list_frame", width=e.width))
+        self.changes_list_frame.bind("<Configure>", lambda e: self.changes_canvas.configure(scrollregion=self.changes_canvas.bbox("all")))
+        
+        def _on_mousewheel(event):
+            self.changes_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self.changes_canvas.bind("<Enter>", lambda e: self.changes_canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        self.changes_canvas.bind("<Leave>", lambda e: self.changes_canvas.unbind_all("<MouseWheel>"))
+
+    def refresh_changes_list(self):
+        # Clear existing items
+        for widget in self.changes_list_frame.winfo_children():
+            widget.destroy()
+            
+        changes = getattr(self, "pending_changes", [])
+        self.changes_total_lbl.configure(text=f"{len(changes)} files")
+        
+        if not changes:
+            lbl = tk.Label(self.changes_list_frame, text="No changes detected", font=("Segoe UI", 8), fg="#585b79", bg=self.bg_color)
+            lbl.pack(fill=tk.X, pady=10)
+            return
+            
+        for change in changes:
+            row = tk.Frame(self.changes_list_frame, bg=self.bg_color, bd=0)
+            row.pack(fill=tk.X, pady=1, padx=(0, 4))
+            
+            if change["type"] == "added":
+                indicator_color = "#a6e3a1"
+                indicator_symbol = "+"
+            elif change["type"] == "deleted":
+                indicator_color = "#f38ba8"
+                indicator_symbol = "-"
+            else:
+                indicator_color = "#fab387"
+                indicator_symbol = "~"
+                
+            ind_lbl = tk.Label(row, text=indicator_symbol, font=("Segoe UI", 9, "bold"), fg=indicator_color, bg=self.bg_color, width=2)
+            ind_lbl.pack(side=tk.LEFT, padx=(2, 4))
+            
+            path_lbl = tk.Label(row, text=change["path"], font=("Segoe UI", 8), fg=self.fg_color, bg=self.bg_color, anchor="w")
+            path_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            
+            stats_str = f"+{change['additions']} -{change['deletions']}"
+            stats_lbl = tk.Label(row, text=stats_str, font=("Segoe UI", 8), fg="#585b79", bg=self.bg_color)
+            stats_lbl.pack(side=tk.RIGHT, padx=4)
+
+    def _reset_baseline(self, workspace_path: str):
+        import hashlib
+        ignore_dirs = {
+            ".git", ".rokct", ".venv", "venv", "env", "__pycache__", 
+            "node_modules", "dist", "build", ".next", ".cache", "out",
+            "target", "bin", "obj", "ios", "android", ".expo", ".output",
+            "logs", "temp", "tmp", "coverage"
+        }
+        allowed_extensions = {
+            ".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".css", 
+            ".json", ".md", ".toml", ".yaml", ".yml", ".txt", ".ini"
+        }
+        new_baseline = {}
+        for root_dir, dirs, files in os.walk(workspace_path):
+            dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
+            for file in files:
+                ext = os.path.splitext(file)[1].lower()
+                if ext not in allowed_extensions:
+                    continue
+                file_path = os.path.join(root_dir, file)
+                rel_path = os.path.relpath(file_path, workspace_path).replace("\\", "/")
+                
+                try:
+                     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                         content = f.read()
+                     lines = content.splitlines()
+                     hasher = hashlib.sha256()
+                     hasher.update(content.encode("utf-8"))
+                     file_hash_val = hasher.hexdigest()
+                     
+                     new_baseline[rel_path] = {
+                         "hash": file_hash_val,
+                         "lines": lines
+                     }
+                except Exception:
+                     pass
+        save_baseline_snapshot(new_baseline)
+
+    def orbit_push(self):
+        config = load_orbit_config()
+        server = config.get("server")
+        token = config.get("token")
+        workspace_path = config.get("workspace")
+        
+        if not token or not server:
+            messagebox.showerror("Push Error", "Please login to Gravity first.", parent=self.root)
+            return
+            
+        if not workspace_path or not os.path.isdir(workspace_path):
+            messagebox.showerror("Push Error", "Please set a valid workspace directory first.", parent=self.root)
+            return
+            
+        if not self.pending_changes:
+            messagebox.showinfo("Push", "No changes to push.", parent=self.root)
+            return
+            
+        # Confirm push
+        if not messagebox.askyesno("Confirm Push", f"Are you sure you want to push {len(self.pending_changes)} modified files to Gravity?", parent=self.root):
+            return
+            
+        self.set_transacting(True)
+        
+        # Build changes payload
+        payload_changes = []
+        for change in self.pending_changes:
+            payload_changes.append({
+                "path": change["path"],
+                "content": change["content"],
+                "type": change["type"]
+            })
+            
+        import urllib.request
+        import urllib.error
+        
+        push_url = f"{server}/gravity/v1/workspace/push"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json"
+        }
+        
+        push_payload = json.dumps({
+            "changes": payload_changes,
+            "message": f"Orbit sync update: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+        }).encode("utf-8")
+        
+        def do_push_thread():
+            try:
+                req = urllib.request.Request(push_url, data=push_payload, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    res_data = json.loads(response.read().decode())
+                    
+                if not res_data.get("status"):
+                    raise Exception(res_data.get("message", "Unknown error occurred on Gravity"))
+                    
+                self.root.after(0, lambda: self.handle_push_success(workspace_path))
+            except urllib.error.HTTPError as e:
+                try:
+                    err_data = json.loads(e.read().decode())
+                    msg = err_data.get("detail", e.reason)
+                except Exception:
+                    msg = e.reason
+                self.root.after(0, lambda: self.handle_push_error(f"Push failed: {msg}"))
+            except Exception as e:
+                self.root.after(0, lambda: self.handle_push_error(f"Failed to connect to Gravity: {str(e)}"))
+                
+        threading.Thread(target=do_push_thread, daemon=True).start()
+
+    def handle_push_success(self, workspace_path):
+        self.set_transacting(False)
+        self._reset_baseline(workspace_path)
+        self.pending_changes = []
+        if self.changes_expanded:
+            self.toggle_changes_panel()
+        self.refresh()
+        messagebox.showinfo("Push Success", "Workspace successfully pushed to Gravity!", parent=self.root)
+
+    def handle_push_error(self, error_msg):
+        self.set_transacting(False)
+        messagebox.showerror("Push Error", error_msg, parent=self.root)
 
 
 def run_widget():
