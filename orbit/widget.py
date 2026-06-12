@@ -11,6 +11,8 @@ import getpass
 import tkinter as tk
 from tkinter import messagebox
 from tkinter import filedialog
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import psutil
 
 # Optional tiktoken import for token calculation
 try:
@@ -23,6 +25,55 @@ except ImportError:
 CONFIG_DIR = os.path.expanduser("~/.orbit")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 THEME_FILE = os.path.join(CONFIG_DIR, "widget_theme.json")
+
+ACTIVE_WIDGET_INSTANCE = None
+
+class OrbitHTTPRequestHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        # Suppress logging request info to console to keep it clean
+        pass
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+    def do_GET(self):
+        if self.path == '/api/ping':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok", "app": "orbit"}).encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        if self.path == '/api/report':
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length)
+            try:
+                data = json.loads(post_data.decode('utf-8'))
+                global ACTIVE_WIDGET_INSTANCE
+                if ACTIVE_WIDGET_INSTANCE:
+                    ACTIVE_WIDGET_INSTANCE.handle_chrome_data(data)
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
 
 
 def load_orbit_config() -> dict:
@@ -109,90 +160,6 @@ def to_superscript(text: str) -> str:
 
 
 
-class LoginDialog(tk.Toplevel):
-    def __init__(self, parent, theme, on_success):
-        super().__init__(parent)
-        self.theme = theme
-        self.on_success = on_success
-        
-        self.title("Orbit Login")
-        self.configure(bg=self.theme["bg_color"])
-        self.resizable(False, False)
-        
-        # Center dialog
-        w, h = 320, 200
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
-        
-        # Always on top & modal focus
-        self.attributes("-topmost", True)
-        self.transient(parent)
-        self.grab_set()
-        
-        # UI Elements
-        tk.Label(
-            self, text="Connect to Gravity Server",
-            font=("Segoe UI", 11, "bold"), fg=self.theme["accent_color"], bg=self.theme["bg_color"]
-        ).pack(pady=(12, 8))
-        
-        # Server URL Frame
-        sf = tk.Frame(self, bg=self.theme["bg_color"])
-        sf.pack(fill=tk.X, padx=20, pady=4)
-        tk.Label(sf, text="Server URL:", font=("Segoe UI", 9), fg=self.theme["fg_color"], bg=self.theme["bg_color"], width=10, anchor="w").pack(side=tk.LEFT)
-        self.server_entry = tk.Entry(sf, bg=self.theme["hover_color"], fg=self.theme["fg_color"], insertbackground=self.theme["fg_color"], bd=1, relief=tk.FLAT)
-        self.server_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        # Configured server fallback
-        config = load_orbit_config()
-        if config.get("server"):
-            self.server_entry.insert(0, config["server"])
-        else:
-            self.server_entry.insert(0, "http://")
-            
-        # API Token Frame
-        tf = tk.Frame(self, bg=self.theme["bg_color"])
-        tf.pack(fill=tk.X, padx=20, pady=4)
-        tk.Label(tf, text="API Token:", font=("Segoe UI", 9), fg=self.theme["fg_color"], bg=self.theme["bg_color"], width=10, anchor="w").pack(side=tk.LEFT)
-        self.token_entry = tk.Entry(tf, show="*", bg=self.theme["hover_color"], fg=self.theme["fg_color"], insertbackground=self.theme["fg_color"], bd=1, relief=tk.FLAT)
-        self.token_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        if config.get("token"):
-            self.token_entry.insert(0, config["token"])
-            
-        # Button bar
-        bf = tk.Frame(self, bg=self.theme["bg_color"])
-        bf.pack(pady=15)
-        
-        btn_conn = tk.Button(
-            bf, text="Connect", font=("Segoe UI", 9, "bold"),
-            bg=self.theme["accent_color"], fg=self.theme["bg_color"],
-            activebackground=self.theme["accent_color"], activeforeground=self.theme["bg_color"],
-            bd=0, padx=14, pady=4, relief=tk.FLAT, cursor="hand2", command=self.submit
-        )
-        btn_conn.pack(side=tk.LEFT, padx=6)
-        
-        btn_cancel = tk.Button(
-            bf, text="Cancel", font=("Segoe UI", 9),
-            bg=self.theme["hover_color"], fg=self.theme["fg_color"],
-            activebackground=self.theme["hover_color"], activeforeground=self.theme["fg_color"],
-            bd=0, padx=14, pady=4, relief=tk.FLAT, cursor="hand2", command=self.destroy
-        )
-        btn_cancel.pack(side=tk.LEFT, padx=6)
-
-    def submit(self):
-        server = self.server_entry.get().strip()
-        token = self.token_entry.get().strip()
-        if not server or not token:
-            messagebox.showerror("Error", "Both Server URL and API Token are required.", parent=self)
-            return
-        
-        config = load_orbit_config()
-        config["server"] = server.rstrip("/")
-        config["token"] = token
-        save_orbit_config(config)
-        
-        self.on_success()
-        self.destroy()
 
 
 class ReminderDialog(tk.Toplevel):
@@ -273,6 +240,16 @@ class TokenStatusWidget:
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         
+        # Register global instance
+        global ACTIVE_WIDGET_INSTANCE
+        ACTIVE_WIDGET_INSTANCE = self
+        
+        # Network monitoring state
+        self.chrome_extension_connected = False
+        self.chrome_data = {}
+        self.net_expanded = False
+        self.net_height = 220
+        
         # Get system username
         try:
             self.username = getpass.getuser()
@@ -290,6 +267,7 @@ class TokenStatusWidget:
         self.hover_color = self.theme["hover_color"]
         
         self.root.configure(bg=self.bg_color)
+        self.root.pack_propagate(False)
         
         # Dimensions
         self.width = self.theme["width"]
@@ -321,13 +299,18 @@ class TokenStatusWidget:
         self.country_code = config.get("country_code", "")
         
         self.logged_in = False
-        self.is_compact = True
+        self.is_compact = False
         self.collapse_timer = None
         self.todo_expanded = False
         self.todo_height = 180
         self._prev_todo_expanded = False
+        self.login_expanded = False
+        self._prev_login_expanded = False
+        self.login_height = 140
         self.original_y = None # Track the position of the widget before expanding todo
         self._calculation_started_cycle = False
+        self.is_transacting = False
+        self.is_online = False
         
         # Build layout UI
         self.setup_ui()
@@ -335,15 +318,18 @@ class TokenStatusWidget:
         # Interaction events
         self.setup_events()
         
-        # Start initial async update after 30 seconds startup grace period
-        self.root.after(30000, self.refresh)
+        # Start background HTTP server for Chrome Extension integration after 2s stabilization grace period
+        self.root.after(2000, self.start_http_server)
+        
+        # Start initial async update after 500ms grace period
+        self.root.after(500, self.refresh)
         
         # Start auto-update scheduler after initial delay
-        self.root.after(30000, self.schedule_auto_refresh)
+        self.root.after(500, self.schedule_auto_refresh)
         
         # Start blinking corner triangle loop after grace period
         self.blink_state = True
-        self.root.after(30000, self.run_blink_loop)
+        self.root.after(500, self.run_blink_loop)
 
     def setup_ui(self):
         # Create container frame
@@ -403,6 +389,16 @@ class TokenStatusWidget:
         self.workspace_btn = tk.Label(
             self.main_frame,
             text="📁",
+            font=("Segoe UI", 11) if sys.platform == "win32" else ("SF Pro Text", 12),
+            fg=self.accent_color,
+            bg=self.bg_color,
+            cursor="hand2"
+        )
+
+        # Next: Network Monitor Icon (Globe emoji)
+        self.net_btn = tk.Label(
+            self.main_frame,
+            text="🌐",
             font=("Segoe UI", 11) if sys.platform == "win32" else ("SF Pro Text", 12),
             fg=self.accent_color,
             bg=self.bg_color,
@@ -472,7 +468,7 @@ class TokenStatusWidget:
                 w.bind("<Double-Button-1>", self.toggle_compact)
             
         # Specific hover and click events for buttons
-        self.login_btn.bind("<Button-1>", lambda e: self.show_login_dialog())
+        self.login_btn.bind("<Button-1>", lambda e: self.toggle_login_expansion())
         self.login_btn.bind("<Enter>", lambda e: [self.on_enter(e), self.login_btn.configure(fg=self.fg_color)])
         self.login_btn.bind("<Leave>", lambda e: [self.on_leave(e), self.login_btn.configure(fg=self.accent_color)])
         
@@ -483,6 +479,10 @@ class TokenStatusWidget:
         self.workspace_btn.bind("<Button-1>", lambda e: self.select_workspace())
         self.workspace_btn.bind("<Enter>", lambda e: [self.on_enter(e), self.workspace_btn.configure(fg=self.fg_color)])
         self.workspace_btn.bind("<Leave>", lambda e: [self.on_leave(e), self.workspace_btn.configure(fg=self.accent_color)])
+        
+        self.net_btn.bind("<Button-1>", lambda e: self.toggle_net_panel())
+        self.net_btn.bind("<Enter>", lambda e: [self.on_enter(e), self.net_btn.configure(fg=self.fg_color)])
+        self.net_btn.bind("<Leave>", lambda e: [self.on_leave(e), self.net_btn.configure(fg=self.accent_color)])
         
         # Override token label click to handle calculation cancellation
         self.token_label.bind("<Button-1>", self.on_token_click)
@@ -495,13 +495,14 @@ class TokenStatusWidget:
         self.root.bind("<Button-3>", self.show_context_menu)
         if sys.platform == "darwin":
             self.root.bind("<Button-2>", self.show_context_menu)
- 
+  
     def on_enter(self, event):
         self.root.configure(bg=self.hover_color)
         self.main_frame.configure(bg=self.hover_color)
         self.login_btn.configure(bg=self.hover_color)
         self.logout_btn.configure(bg=self.hover_color)
         self.workspace_btn.configure(bg=self.hover_color)
+        self.net_btn.configure(bg=self.hover_color)
         self.sep_label1.configure(bg=self.hover_color)
         self.token_label.configure(bg=self.hover_color)
         self.close_btn.configure(bg=self.hover_color)
@@ -513,7 +514,7 @@ class TokenStatusWidget:
         if self.is_compact:
             self.is_compact = False
             self.update_layout()
- 
+  
     def on_leave(self, event):
         # Prevent spurious leaves if the mouse pointer is still inside the window bounds
         try:
@@ -533,16 +534,13 @@ class TokenStatusWidget:
         self.login_btn.configure(bg=self.bg_color)
         self.logout_btn.configure(bg=self.bg_color)
         self.workspace_btn.configure(bg=self.bg_color)
+        self.net_btn.configure(bg=self.bg_color)
         self.sep_label1.configure(bg=self.bg_color)
         self.token_label.configure(bg=self.bg_color)
         self.close_btn.configure(bg=self.bg_color)
         
-        # Trigger auto-collapse to compact mode in 10 seconds (only if todo list is not expanded)
-        if self.collapse_timer:
-            self.root.after_cancel(self.collapse_timer)
-            self.collapse_timer = None
-        if not self.todo_expanded:
-            self.collapse_timer = self.root.after(10000, self.auto_collapse)
+        # Auto-collapse to compact mode disabled as requested
+        pass
 
 
 
@@ -654,47 +652,7 @@ class TokenStatusWidget:
         config = load_orbit_config()
         self.logged_in = bool(config.get("token"))
         
-        # 1. Check Internet and Server Status
-        online = self._check_connection()
-        
-        # 2. Fetch country code and flag image if online (cached locally after first fetch)
-        if online:
-            if not self.country_code:
-                try:
-                    import urllib.request
-                    req = urllib.request.Request("http://ip-api.com/json", headers={"User-Agent": "Orbit/1.0"})
-                    with urllib.request.urlopen(req, timeout=3.0) as response:
-                        data = json.loads(response.read().decode())
-                        self.country_code = data.get("countryCode", "").lower()
-                        if self.country_code:
-                            # Save to config cache
-                            config = load_orbit_config()
-                            config["country_code"] = self.country_code
-                            save_orbit_config(config)
-                except Exception:
-                    pass
-            
-            if self.country_code:
-                # Ensure flags directory exists
-                flags_dir = os.path.join(CONFIG_DIR, "flags")
-                os.makedirs(flags_dir, exist_ok=True)
-                self.flag_path = os.path.join(flags_dir, f"{self.country_code}.png")
-                if not os.path.isfile(self.flag_path):
-                    try:
-                        import urllib.request
-                        flag_url = f"https://flagcdn.com/w20/{self.country_code}.png"
-                        req = urllib.request.Request(flag_url, headers={"User-Agent": "Orbit/1.0"})
-                        with urllib.request.urlopen(req, timeout=4.0) as response:
-                            with open(self.flag_path, "wb") as f:
-                                f.write(response.read())
-                    except Exception:
-                        self.flag_path = None
-            else:
-                self.flag_path = None
-        else:
-            self.flag_path = None
-                
-        # 3. Count Tokens and Size of current workspace
+        # Count Tokens and Size of current workspace
         workspace_dir = config.get("workspace")
         if not workspace_dir or not os.path.isdir(workspace_dir):
             # Fallback to repository root
@@ -707,28 +665,31 @@ class TokenStatusWidget:
             # Format tokens neatly
             if was_canceled:
                 tokens_str = "Canceled"
+            elif tokens >= 1_000_000_000:
+                tokens_str = f"{round(tokens / 1_000_000_000)}G"
             elif tokens >= 1_000_000:
-                tokens_str = f"{tokens / 1_000_000:.2f}M"
+                tokens_str = f"{round(tokens / 1_000_000)}M"
             elif tokens >= 1_000:
-                tokens_str = f"{tokens / 1_000:.1f}k"
+                tokens_str = f"{round(tokens / 1_000)}K"
             else:
                 tokens_str = str(tokens)
                 
             # Format size neatly
-            if size_bytes >= 1_048_576:
-                size_str = f"{size_bytes / 1_048_576:.1f} MB"
+            if size_bytes >= 1_073_741_824:
+                size_str = f"{round(size_bytes / 1_073_741_824)} GB"
+            elif size_bytes >= 1_048_576:
+                size_str = f"{round(size_bytes / 1_048_576)} MB"
             elif size_bytes >= 1024:
-                size_str = f"{size_bytes / 1024:.1f} KB"
+                size_str = f"{round(size_bytes / 1024)} KB"
             else:
                 size_str = f"{size_bytes} B"
                 
             # Schedule GUI updates on the main thread safely
-            self.root.after(0, self._apply_updates, online, tokens_str, size_str, is_done or was_canceled)
+            self.root.after(0, self._apply_updates, tokens_str, size_str, is_done or was_canceled)
             
         self._calculate_codebase_tokens(workspace_dir, progress_callback)
 
-    def _apply_updates(self, online, tokens_str, size_str, is_done=True):
-        self.is_online = online
+    def _apply_updates(self, tokens_str, size_str, is_done=True):
         self.tokens_str = tokens_str
         self.size_str = size_str
         
@@ -742,29 +703,18 @@ class TokenStatusWidget:
 
     def update_layout(self, is_done=True):
             
-        try:
-            bg = self.brand_badge.cget("bg")
-        except Exception:
-            bg = "#ff4600"
-            
-        if self.is_online:
-            if bg.lower() in ["#a6e3a1", "#13f300"] or bg.lower().startswith("#a") or bg.lower().startswith("#0") or bg.lower().startswith("#13"):
-                color = "#ffffff"
-            else:
-                color = "#13F300"
+        # Update status line color based on transaction state
+        if getattr(self, "is_transacting", False):
+            self.status_line.configure(bg="#13F300")
         else:
-            if bg.lower() in ["#ff4600", "#f38ba8"] or bg.lower().startswith("#f") or bg.lower().startswith("#e"):
-                color = "#ffffff"
-            else:
-                color = self.offline_color
-                
-        self.status_line.configure(bg=color)
+            self.status_line.configure(bg="#ff4600")
         
         # Clear packing for all dynamically ordered widgets to preserve strict sorting
         self.brand_badge.pack_forget()
         self.login_btn.pack_forget()
         self.logout_btn.pack_forget()
         self.workspace_btn.pack_forget()
+        self.net_btn.pack_forget()
         self.sep_label1.pack_forget()
         self.token_label.pack_forget()
         
@@ -788,8 +738,12 @@ class TokenStatusWidget:
         # Strip string suffix to get local token number approximation
         try:
             local_tokens = 0
-            if "M" in self.tokens_str:
+            if "G" in self.tokens_str:
+                local_tokens = int(float(self.tokens_str.replace("G", "")) * 1_000_000_000)
+            elif "M" in self.tokens_str:
                 local_tokens = int(float(self.tokens_str.replace("M", "")) * 1_000_000)
+            elif "K" in self.tokens_str:
+                local_tokens = int(float(self.tokens_str.replace("K", "")) * 1_000)
             elif "k" in self.tokens_str:
                 local_tokens = int(float(self.tokens_str.replace("k", "")) * 1_000)
             else:
@@ -802,30 +756,36 @@ class TokenStatusWidget:
         delta_str = ""
         delta_color = "#fab387" # Standard peach
         if delta_tokens > 0:
-            if delta_tokens >= 1_000_000:
-                delta_str = f"+{delta_tokens / 1_000_000:.2f}M"
+            if delta_tokens >= 1_000_000_000:
+                delta_str = f"+{round(delta_tokens / 1_000_000_000)}G"
+            elif delta_tokens >= 1_000_000:
+                delta_str = f"+{round(delta_tokens / 1_000_000)}M"
             elif delta_tokens >= 1_000:
-                delta_str = f"+{delta_tokens / 1_000:.1f}k"
+                delta_str = f"+{round(delta_tokens / 1_000)}K"
             else:
                 delta_str = f"+{delta_tokens}"
             delta_color = "#a6e3a1" # Vibrant green for additions
         elif delta_tokens < 0:
             abs_delta = abs(delta_tokens)
-            if abs_delta >= 1_000_000:
-                delta_str = f"-{abs_delta / 1_000_000:.2f}M"
+            if abs_delta >= 1_000_000_000:
+                delta_str = f"-{round(abs_delta / 1_000_000_000)}G"
+            elif abs_delta >= 1_000_000:
+                delta_str = f"-{round(abs_delta / 1_000_000)}M"
             elif abs_delta >= 1_000:
-                delta_str = f"-{abs_delta / 1_000:.1f}k"
+                delta_str = f"-{round(abs_delta / 1_000)}K"
             else:
                 delta_str = f"-{abs_delta}"
             delta_color = "#f38ba8" # Vibrant red for removals
-
+ 
         # Render display: show remote baseline tokens (Gravity metadata baseline) if it exists, otherwise local tokens count
         base_display = ""
         if remote_tokens > 0:
-            if remote_tokens >= 1_000_000:
-                base_display = f"{remote_tokens / 1_000_000:.2f}M"
+            if remote_tokens >= 1_000_000_000:
+                base_display = f"{round(remote_tokens / 1_000_000_000)}G"
+            elif remote_tokens >= 1_000_000:
+                base_display = f"{round(remote_tokens / 1_000_000)}M"
             elif remote_tokens >= 1_000:
-                base_display = f"{remote_tokens / 1_000:.1f}k"
+                base_display = f"{round(remote_tokens / 1_000)}K"
             else:
                 base_display = str(remote_tokens)
         else:
@@ -845,15 +805,24 @@ class TokenStatusWidget:
                 self.delta_label.pack(side=tk.LEFT, padx=(4, 0))
         else:
             # Expanded Layout
+            # Always show workspace button to allow changing workspace at any time
+            self.workspace_btn.pack(side=tk.LEFT, padx=(0, 4))
+
             if self.logged_in:
                 self.app_label.configure(text=f"{brand} ({self.username})")
                 self.logout_btn.pack(side=tk.LEFT, padx=(0, 4))
             else:
                 self.app_label.configure(text=brand)
-                if not workspace_set:
-                    self.workspace_btn.pack(side=tk.LEFT, padx=(0, 4))
-                else:
+                if workspace_set:
                     self.login_btn.pack(side=tk.LEFT, padx=(0, 4))
+            
+            # Pack net_btn if chrome extension has connected
+            if getattr(self, "chrome_extension_connected", False):
+                self.net_btn.pack(side=tk.LEFT, padx=(0, 4))
+                if self.net_expanded:
+                    self.net_btn.configure(fg=self.accent_color)
+                else:
+                    self.net_btn.configure(fg=self.fg_color)
                     
             # Repack separator and display
             self.sep_label1.pack(side=tk.LEFT, padx=6)
@@ -863,49 +832,46 @@ class TokenStatusWidget:
                 self.delta_label.configure(text=delta_str, fg=delta_color)
                 self.delta_label.pack(side=tk.LEFT, padx=(4, 0))
             
-        # Ensure status indicator line stays on top of brand badge child elements
-        self.status_line.lift()
+        # Determine stable width depending on state (login/todo/net expansion vs normal/compact)
+        if self.login_expanded or self.todo_expanded or self.net_expanded:
+            new_width = 300
+        else:
+            new_width = 260
             
         # Re-pack self.main_frame and set heights depending on expanded todo state
-        if self.todo_expanded:
-            self.main_frame.pack_forget()
+        self.main_frame.pack_forget()
+        if self.todo_expanded or self.login_expanded or self.net_expanded:
             self.main_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=(0, 8), pady=0)
-            self.main_frame.configure(height=self.height)
-            self.main_frame.pack_propagate(False)
         else:
-            self.main_frame.pack_forget()
             self.main_frame.pack(fill=tk.BOTH, expand=True, padx=(0, 8), pady=0)
-            self.main_frame.pack_propagate(True)
             
-        # Dynamically calculate and set window width
-        self.root.update_idletasks()
-        new_width = self.main_frame.winfo_reqwidth() + 20 # Add padding
-        if self.todo_expanded and hasattr(self, "todo_frame"):
-            new_width = max(new_width, self.todo_frame.winfo_reqwidth() + 20)
+        self.main_frame.configure(height=self.height, width=new_width)
+        self.main_frame.pack_propagate(False)
             
-        target_height = self.height + self.todo_height if self.todo_expanded else self.height
+        if self.todo_expanded:
+            target_height = self.height + self.todo_height
+        elif self.login_expanded:
+            target_height = self.height + self.login_height
+        elif self.net_expanded:
+            target_height = self.height + self.net_height
+        else:
+            target_height = self.height
         
         # Preserve position coordinates while adapting window geometry (upwards/downwards expansion)
         curr_x = self.root.winfo_x()
         curr_y = self.root.winfo_y()
         old_width = self.root.winfo_width()
+        old_height = self.root.winfo_height()
         
-        # Shift Y coordinate correctly during Todo toggle transitions to expand upwards and collapse back
+        # Shift Y coordinate correctly depending on screen half (expand upwards if on the bottom half, downwards if on the top half)
         new_y = curr_y
-        if self.todo_expanded:
-            if not getattr(self, "_prev_todo_expanded", False):
-                self.original_y = curr_y
-                new_y = curr_y - self.todo_height
-        else:
-            if getattr(self, "_prev_todo_expanded", False):
-                if getattr(self, "original_y", None) is not None:
-                    new_y = self.original_y
-                    self.original_y = None
-                else:
-                    new_y = curr_y + self.todo_height
+        if old_height > 1:
+            screen_h = self.root.winfo_screenheight()
+            if curr_y + (old_height / 2) > (screen_h / 2):
+                new_y = curr_y - (target_height - old_height)
+            else:
+                new_y = curr_y
                 
-        self._prev_todo_expanded = self.todo_expanded
-        
         # Adjust X based on screen half (anchor right if on the right half, left if on the left half)
         new_x = curr_x
         if old_width > 1:
@@ -930,17 +896,188 @@ class TokenStatusWidget:
             self.menu.add_command(label="Set Workspace Directory...", command=self.select_workspace)
         else:
             self.menu.add_command(label="Change Workspace...", command=self.select_workspace)
+            self.menu.add_command(label="Clear Workspace", command=self.clear_workspace)
             
         if config.get("token"):
             self.menu.add_command(label="Logout", command=self.logout)
         elif config.get("workspace"):
-            self.menu.add_command(label="Login", command=self.show_login_dialog)
+            self.menu.add_command(label="Login", command=self.toggle_login_expansion)
             
         self.menu.add_separator()
         self.menu.add_command(label="Exit Widget", command=self.root.destroy)
 
-    def show_login_dialog(self):
-        LoginDialog(self.root, self.theme, on_success=self.refresh)
+    def setup_login_ui(self):
+        self.login_frame = tk.Frame(self.root, bg=self.bg_color, bd=0)
+        
+        # Header title
+        header_frame = tk.Frame(self.login_frame, bg=self.bg_color)
+        header_frame.pack(fill=tk.X, padx=10, pady=(8, 2))
+        
+        tk.Label(
+            header_frame, text="Connect to Gravity",
+            font=("Segoe UI", 9, "bold") if sys.platform == "win32" else ("SF Pro Text", 10, "bold"),
+            fg=self.accent_color, bg=self.bg_color
+        ).pack(side=tk.LEFT)
+        
+        # Form fields container
+        form_frame = tk.Frame(self.login_frame, bg=self.bg_color)
+        form_frame.pack(fill=tk.X, padx=10, pady=2)
+        
+        # Email / Username Row
+        ef = tk.Frame(form_frame, bg=self.bg_color)
+        ef.pack(fill=tk.X, pady=2)
+        tk.Label(ef, text="Email / Usr:", font=("Segoe UI", 9), fg=self.fg_color, bg=self.bg_color, width=10, anchor="w").pack(side=tk.LEFT)
+        self.email_entry = tk.Entry(ef, bg=self.hover_color, fg=self.fg_color, insertbackground=self.fg_color, bd=1, relief=tk.FLAT)
+        self.email_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        config = load_orbit_config()
+        if config.get("email"):
+            self.email_entry.insert(0, config["email"])
+            
+        # Password Row
+        pf = tk.Frame(form_frame, bg=self.bg_color)
+        pf.pack(fill=tk.X, pady=2)
+        tk.Label(pf, text="Password:", font=("Segoe UI", 9), fg=self.fg_color, bg=self.bg_color, width=10, anchor="w").pack(side=tk.LEFT)
+        self.password_entry = tk.Entry(pf, show="*", bg=self.hover_color, fg=self.fg_color, insertbackground=self.theme["fg_color"], bd=1, relief=tk.FLAT)
+        self.password_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.password_entry.bind("<Return>", lambda e: self.submit_login())
+        
+        # Buttons Row
+        bf = tk.Frame(self.login_frame, bg=self.bg_color)
+        bf.pack(fill=tk.X, padx=10, pady=(6, 8))
+        
+        btn_conn = tk.Button(
+            bf, text="Connect", font=("Segoe UI", 8, "bold"),
+            bg=self.accent_color, fg=self.bg_color,
+            activebackground=self.accent_color, activeforeground=self.bg_color,
+            bd=0, padx=12, pady=3, relief=tk.FLAT, cursor="hand2", command=self.submit_login
+        )
+        btn_conn.pack(side=tk.RIGHT, padx=4)
+        
+        btn_cancel = tk.Button(
+            bf, text="Cancel", font=("Segoe UI", 8),
+            bg=self.hover_color, fg=self.fg_color,
+            activebackground=self.hover_color, activeforeground=self.fg_color,
+            bd=0, padx=12, pady=3, relief=tk.FLAT, cursor="hand2", command=self.toggle_login_expansion
+        )
+        btn_cancel.pack(side=tk.RIGHT, padx=4)
+
+    def submit_login(self):
+        server = "https://platform.rokct.ai"
+        email = self.email_entry.get().strip()
+        password = self.password_entry.get().strip()
+        
+        if not email or not password:
+            messagebox.showerror("Error", "All fields are required.", parent=self.root)
+            return
+            
+        self.set_transacting(True)
+        # 1. Perform login on Control site
+        login_url = f"{server}/api/method/rcore.api.auth.login.login"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        login_payload = json.dumps({"usr": email, "pwd": password}).encode("utf-8")
+        
+        import urllib.request
+        import urllib.error
+        
+        try:
+            req = urllib.request.Request(login_url, data=login_payload, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=10) as response:
+                res_data = json.loads(response.read().decode())
+                
+            if not res_data.get("status") or "data" not in res_data:
+                self.set_transacting(False)
+                messagebox.showerror("Login Failed", res_data.get("message", "Invalid response from Gravity"), parent=self.root)
+                return
+                
+            access_token = res_data["data"]["access_token"]
+            
+        except urllib.error.HTTPError as e:
+            self.set_transacting(False)
+            try:
+                err_data = json.loads(e.read().decode())
+                msg = err_data.get("message", e.reason)
+            except Exception:
+                msg = e.reason
+            messagebox.showerror("Login Error", f"Gravity login failed: {msg}", parent=self.root)
+            return
+        except Exception as e:
+            self.set_transacting(False)
+            messagebox.showerror("Connection Error", f"Failed to connect to Gravity: {str(e)}", parent=self.root)
+            return
+
+        # 2. Perform Handshake on Gravity via the reverse proxy (/gravity/v1/handshake)
+        handshake_url = f"{server}/gravity/v1/handshake"
+        device_id = f"{getpass.getuser()}_{socket.gethostname()}"
+        handshake_payload = json.dumps({
+            "access_token": access_token,
+            "device_id": device_id
+        }).encode("utf-8")
+        
+        try:
+            req = urllib.request.Request(handshake_url, data=handshake_payload, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=10) as response:
+                res_data = json.loads(response.read().decode())
+                
+            if not res_data.get("status") or "gravity_token" not in res_data:
+                self.set_transacting(False)
+                messagebox.showerror("Handshake Failed", "Invalid handshake response from Gravity", parent=self.root)
+                return
+                
+            gravity_token = res_data["gravity_token"]
+            
+        except urllib.error.HTTPError as e:
+            self.set_transacting(False)
+            try:
+                err_data = json.loads(e.read().decode())
+                msg = err_data.get("detail", e.reason)
+            except Exception:
+                msg = e.reason
+            messagebox.showerror("Handshake Error", f"Gravity handshake failed: {msg}", parent=self.root)
+            return
+        except Exception as e:
+            self.set_transacting(False)
+            messagebox.showerror("Handshake Connection Error", f"Failed to connect to Gravity: {str(e)}", parent=self.root)
+            return
+
+        # 3. Store Gravity session token and server
+        config = load_orbit_config()
+        config["server"] = server
+        config["email"] = email
+        config["token"] = gravity_token
+        config["control_token"] = access_token
+        save_orbit_config(config)
+        
+        self.set_transacting(False)
+        self.toggle_login_expansion()
+        self.refresh()
+
+    def toggle_login_expansion(self, event=None):
+        self.login_expanded = not self.login_expanded
+        
+        if self.collapse_timer:
+            self.root.after_cancel(self.collapse_timer)
+            self.collapse_timer = None
+            
+        if self.login_expanded:
+            self.is_compact = False
+            # Collapse todo list if it is expanded
+            if self.todo_expanded:
+                self.toggle_todo_list()
+                
+            if not hasattr(self, "login_frame"):
+                self.setup_login_ui()
+                
+            self.login_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self.email_entry.focus_set()
+        else:
+            if hasattr(self, "login_frame"):
+                self.login_frame.pack_forget()
+                
+        self.update_layout()
+        return "break"
 
     def select_workspace(self):
         folder = filedialog.askdirectory(title="Select Orbit Workspace", parent=self.root)
@@ -951,10 +1088,20 @@ class TokenStatusWidget:
             save_orbit_config(config)
             self.refresh()
 
+    def clear_workspace(self):
+        config = load_orbit_config()
+        if "workspace" in config:
+            del config["workspace"]
+        save_orbit_config(config)
+        self.refresh()
+
     def toggle_compact(self, event=None):
         self.is_compact = not self.is_compact
-        if self.is_compact and self.todo_expanded:
-            self.toggle_todo_list()
+        if self.is_compact:
+            if self.todo_expanded:
+                self.toggle_todo_list()
+            if self.login_expanded:
+                self.toggle_login_expansion()
         self.update_layout()
         return "break"
 
@@ -962,41 +1109,38 @@ class TokenStatusWidget:
         self.is_compact = True
         if self.todo_expanded:
             self.toggle_todo_list()
+        if self.login_expanded:
+            self.toggle_login_expansion()
         self.update_layout()
 
+    def set_transacting(self, active: bool):
+        self.is_transacting = active
+        if active:
+            try:
+                self.status_line.configure(bg="#13F300")
+            except Exception:
+                pass
+        else:
+            try:
+                self.status_line.configure(bg="#ff4600")
+            except Exception:
+                pass
+
     def run_blink_loop(self):
-        self.blink_state = not self.blink_state
-        
-        # Read the current badge background color
-        try:
-            bg = self.brand_badge.cget("bg")
-        except Exception:
-            bg = "#ff4600"
-            
-        # Determine offline color
-        if bg.lower() in ["#ff4600", "#f38ba8"] or bg.lower().startswith("#f") or bg.lower().startswith("#e"):
-            offline_c = "#ffffff"  # Background is red/orange, use white
+        if getattr(self, "is_transacting", False):
+            self.blink_state = not self.blink_state
+            # Alternate between green and badge background
+            color = "#13F300" if self.blink_state else "#ff4600"
+            try:
+                self.status_line.configure(bg=color)
+            except Exception:
+                return
         else:
-            offline_c = "#f38ba8"  # Use standard red
-            
-        # Determine online blink color
-        if bg.lower() in ["#a6e3a1", "#13f300"] or bg.lower().startswith("#a") or bg.lower().startswith("#0") or bg.lower().startswith("#13"):
-            online_c = "#ffffff"  # Background is green, use white
-        else:
-            online_c = "#13F300"  # Vibrant green
-            
-        if self.is_online:
-            # Alternate between online color and badge background
-            color = online_c if self.blink_state else bg
-        else:
-            color = offline_c
-            
-        try:
-            self.status_line.configure(bg=color)
-        except Exception:
-            return
-            
-        self.root.after(800, self.run_blink_loop)
+            try:
+                self.status_line.configure(bg="#ff4600")
+            except Exception:
+                return
+        self.root.after(400, self.run_blink_loop)
 
     def toggle_todo_list(self, event=None):
         self.todo_expanded = not self.todo_expanded
@@ -1375,6 +1519,145 @@ class TokenStatusWidget:
             
         update_callback(total_tokens, total_bytes, True)
         return total_tokens, total_bytes
+
+    def start_http_server(self):
+        def run_server():
+            server_address = ('127.0.0.1', 49998)
+            class ReuseHTTPServer(HTTPServer):
+                allow_reuse_address = True
+            try:
+                httpd = ReuseHTTPServer(server_address, OrbitHTTPRequestHandler)
+                httpd.serve_forever()
+            except Exception as e:
+                pass
+        threading.Thread(target=run_server, daemon=True).start()
+
+    def handle_chrome_data(self, data):
+        self.chrome_extension_connected = True
+        self.chrome_data = data
+        self.root.after(0, self.update_layout_from_chrome)
+
+    def update_layout_from_chrome(self):
+        self.update_layout()
+        if self.net_expanded:
+            self.refresh_net_list()
+
+    def toggle_net_panel(self, event=None):
+        self.net_expanded = not self.net_expanded
+        if self.collapse_timer:
+            self.root.after_cancel(self.collapse_timer)
+            self.collapse_timer = None
+            
+        if self.net_expanded:
+            self.is_compact = False
+            # Collapse other panels
+            if self.todo_expanded:
+                self.toggle_todo_list()
+            if self.login_expanded:
+                self.toggle_login_expansion()
+                
+            if not hasattr(self, "net_frame"):
+                self.setup_net_ui()
+            self.net_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self.refresh_net_list()
+        else:
+            if hasattr(self, "net_frame"):
+                self.net_frame.pack_forget()
+                
+        self.update_layout()
+        return "break"
+
+    def setup_net_ui(self):
+        self.net_frame = tk.Frame(self.root, bg=self.bg_color, bd=0)
+        
+        # Header title for network
+        header_frame = tk.Frame(self.net_frame, bg=self.bg_color)
+        header_frame.pack(fill=tk.X, padx=10, pady=(8, 2))
+        
+        tk.Label(
+            header_frame, text="Network Monitor",
+            font=("Segoe UI", 9, "bold") if sys.platform == "win32" else ("SF Pro Text", 10, "bold"),
+            fg=self.accent_color, bg=self.bg_color
+        ).pack(side=tk.LEFT)
+        
+        self.net_total_lbl = tk.Label(
+            header_frame, text="OS: -- | Ext: --",
+            font=("Segoe UI", 7) if sys.platform == "win32" else ("SF Pro Text", 8),
+            fg="#585b79", bg=self.bg_color
+        )
+        self.net_total_lbl.pack(side=tk.RIGHT)
+        
+        # Scrollable Canvas
+        self.net_canvas = tk.Canvas(self.net_frame, bg=self.bg_color, bd=0, highlightthickness=0)
+        self.net_scrollbar = tk.Scrollbar(self.net_frame, orient="vertical", command=self.net_canvas.yview, width=6, bd=0, elementborderwidth=0)
+        self.net_list_frame = tk.Frame(self.net_canvas, bg=self.bg_color)
+        
+        self.net_canvas.create_window((0, 0), window=self.net_list_frame, anchor="nw", tags="self.net_list_frame")
+        self.net_canvas.configure(yscrollcommand=self.net_scrollbar.set)
+        
+        self.net_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=(10, 0), pady=2)
+        self.net_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(2, 4))
+        
+        self.net_canvas.bind("<Configure>", lambda e: self.net_canvas.itemconfig("self.net_list_frame", width=e.width))
+        self.net_list_frame.bind("<Configure>", lambda e: self.net_canvas.configure(scrollregion=self.net_canvas.bbox("all")))
+        
+        def _on_mousewheel(event):
+            self.net_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self.net_canvas.bind("<Enter>", lambda e: self.net_canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        self.net_canvas.bind("<Leave>", lambda e: self.net_canvas.unbind_all("<MouseWheel>"))
+
+    def refresh_net_list(self):
+        # Clear existing items
+        for widget in self.net_list_frame.winfo_children():
+            widget.destroy()
+            
+        # 1. Fetch OS-wide network stats
+        try:
+            counters = psutil.net_io_counters()
+            os_total = counters.bytes_sent + counters.bytes_recv
+            def fmt(b):
+                if b >= 1073741824: return f"{b/1073741824:.1f} GB"
+                if b >= 1048576: return f"{b/1048576:.1f} MB"
+                if b >= 1024: return f"{b/1024:.1f} KB"
+                return f"{b} B"
+            os_str = fmt(os_total)
+        except Exception:
+            os_str = "Error"
+            
+        # 2. Fetch Chrome extension data
+        domains = self.chrome_data.get("dataUsage", {})
+        chrome_total = sum(d.get("totalSize", 0) for d in domains.values())
+        chrome_str = fmt(chrome_total)
+        
+        self.net_total_lbl.configure(text=f"OS: {os_str} | Chrome: {chrome_str}")
+        
+        # Sort domains by data size
+        sorted_domains = sorted(domains.items(), key=lambda x: x[1].get("totalSize", 0), reverse=True)
+        
+        # ROKCT standard app data listing
+        row = tk.Frame(self.net_list_frame, bg=self.hover_color, bd=0)
+        row.pack(fill=tk.X, pady=2, padx=(0, 4))
+        tk.Label(row, text="🖥️ Total OS Network", font=("Segoe UI", 9, "bold"), fg=self.fg_color, bg=self.hover_color).pack(side=tk.LEFT, padx=8, pady=4)
+        tk.Label(row, text=os_str, font=("Segoe UI", 9, "bold"), fg=self.accent_color, bg=self.hover_color).pack(side=tk.RIGHT, padx=8)
+
+        row2 = tk.Frame(self.net_list_frame, bg=self.hover_color, bd=0)
+        row2.pack(fill=tk.X, pady=2, padx=(0, 4))
+        tk.Label(row2, text="🌐 Chrome Total", font=("Segoe UI", 9, "bold"), fg=self.fg_color, bg=self.hover_color).pack(side=tk.LEFT, padx=8, pady=4)
+        tk.Label(row2, text=chrome_str, font=("Segoe UI", 9, "bold"), fg=self.accent_color, bg=self.hover_color).pack(side=tk.RIGHT, padx=8)
+
+        # Show detailed Chrome sites if they exist
+        for domain, d_info in sorted_domains[:10]: # Top 10 sites
+            size = d_info.get("totalSize", 0)
+            if size == 0: continue
+            
+            d_row = tk.Frame(self.net_list_frame, bg=self.bg_color, bd=0)
+            d_row.pack(fill=tk.X, pady=1, padx=(10, 4))
+            
+            lbl_domain = tk.Label(d_row, text=f"• {domain}", font=("Segoe UI", 8), fg="#a6adc8", bg=d_row.cget("bg"), anchor="w")
+            lbl_domain.pack(side=tk.LEFT, padx=4, pady=2)
+            
+            lbl_size = tk.Label(d_row, text=fmt(size), font=("Segoe UI", 8), fg=self.fg_color, bg=d_row.cget("bg"))
+            lbl_size.pack(side=tk.RIGHT, padx=4)
 
 
 def run_widget():
