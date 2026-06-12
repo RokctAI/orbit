@@ -16,6 +16,7 @@ dependencies = [
     "httpx>=0.25",
     "watchdog>=3.0",
     "tiktoken>=0.5.0",
+    "psutil>=5.9.0",
 ]
 
 
