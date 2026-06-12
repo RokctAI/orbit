@@ -700,15 +700,15 @@ class TokenStatusWidget:
             
             # Format tokens neatly
             if was_canceled:
-                tokens_str = "Canceled"
+                toks_str = "Canceled"
             elif tokens >= 1_000_000_000:
-                tokens_str = f"{round(tokens / 1_000_000_000)}G"
+                toks_str = f"{round(tokens / 1_000_000_000)}G"
             elif tokens >= 1_000_000:
-                tokens_str = f"{round(tokens / 1_000_000)}M"
+                toks_str = f"{round(tokens / 1_000_000)}M"
             elif tokens >= 1_000:
-                tokens_str = f"{round(tokens / 1_000)}K"
+                toks_str = f"{round(tokens / 1_000)}K"
             else:
-                tokens_str = str(tokens)
+                toks_str = str(tokens)
                 
             # Format size neatly
             if size_bytes >= 1_073_741_824:
@@ -721,7 +721,7 @@ class TokenStatusWidget:
                 size_str = f"{size_bytes} B"
                 
             # Schedule GUI updates on the main thread safely
-            self.root.after(0, self._apply_updates, tokens_str, size_str, is_done or was_canceled)
+            self.root.after(0, self._apply_updates, toks_str, size_str, is_done or was_canceled)
             
         self._calculate_codebase_tokens(workspace_dir, progress_callback)
         try:
