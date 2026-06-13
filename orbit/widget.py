@@ -276,6 +276,12 @@ class TokenStatusWidget:
         self.changes_expanded = False
         self.changes_height = 200
         
+        # Test Runner State
+        self.test_status_text = ""
+        self.test_status_color = "#ffffff"
+        self.last_test_results = {}
+        self.prev_test_status = ""
+        
         # Get system username
         try:
             self.username = getpass.getuser()
@@ -451,6 +457,16 @@ class TokenStatusWidget:
             bg=self.bg_color
         )
         self.token_label.pack(side=tk.LEFT)
+        
+        # Test Status Label
+        self.test_label = tk.Label(
+            self.main_frame,
+            text="",
+            font=("Segoe UI", 9, "bold") if sys.platform == "win32" else ("SF Pro Text", 10, "bold"),
+            bg=self.bg_color,
+            cursor="hand2"
+        )
+        self.test_label.bind("<Button-1>", self.show_test_output_window)
         
         # Delta label to show (+X or -Y) in custom color
         self.delta_label = tk.Label(
@@ -728,6 +744,12 @@ class TokenStatusWidget:
             self._detect_changes(workspace_dir)
         except Exception:
             pass
+            
+        if self.logged_in:
+            try:
+                self.fetch_test_status()
+            except Exception:
+                pass
 
     def _apply_updates(self, tokens_str, size_str, is_done=True):
         self.tokens_str = tokens_str
@@ -757,6 +779,7 @@ class TokenStatusWidget:
         self.net_btn.pack_forget()
         self.sep_label1.pack_forget()
         self.token_label.pack_forget()
+        self.test_label.pack_forget()
         
         config = load_orbit_config()
         workspace_set = bool(config.get("workspace"))
@@ -852,6 +875,9 @@ class TokenStatusWidget:
             if delta_str:
                 self.delta_label.configure(text=delta_str, fg=delta_color)
                 self.delta_label.pack(side=tk.LEFT, padx=(4, 0))
+            if getattr(self, "test_status_text", ""):
+                self.test_label.configure(text=self.test_status_text, fg=self.test_status_color)
+                self.test_label.pack(side=tk.LEFT, padx=(4, 0))
         else:
             # Expanded Layout
             # Always show workspace button to allow changing workspace at any time
@@ -880,6 +906,9 @@ class TokenStatusWidget:
             if delta_str:
                 self.delta_label.configure(text=delta_str, fg=delta_color)
                 self.delta_label.pack(side=tk.LEFT, padx=(4, 0))
+            if getattr(self, "test_status_text", ""):
+                self.test_label.configure(text=self.test_status_text, fg=self.test_status_color)
+                self.test_label.pack(side=tk.LEFT, padx=(4, 0))
             
         # Determine stable width depending on state (login/todo/net/changes expansion vs normal/compact)
         if self.login_expanded or self.todo_expanded or self.net_expanded or self.changes_expanded:
@@ -1026,9 +1055,12 @@ class TokenStatusWidget:
         self.set_transacting(True)
         # 1. Perform login on Control site
         login_url = f"{server}/api/method/rcore.api.auth.login.login"
+        import uuid
+        trace_id = f"trace_{uuid.uuid4().hex}"
         headers = {
             "Content-Type": "application/json",
-            "Accept": "application/json"
+            "Accept": "application/json",
+            "x-trace-id": trace_id
         }
         login_payload = json.dumps({"usr": email, "pwd": password}).encode("utf-8")
         
@@ -1908,14 +1940,44 @@ class TokenStatusWidget:
                 indicator_color = "#fab387"
                 indicator_symbol = "~"
                 
-            ind_lbl = tk.Label(row, text=indicator_symbol, font=("Segoe UI", 9, "bold"), fg=indicator_color, bg=self.bg_color, width=2)
-            ind_lbl.pack(side=tk.LEFT, padx=(2, 4))
+            # Determine lang badge text & styling
+            ext = os.path.splitext(change["path"])[1].lower()
+            badge_config = {
+                ".py": (" PY ", "#3572A5", "#ffffff"),
+                ".html": ("HTML", "#e34c26", "#ffffff"),
+                ".css": ("CSS", "#563d7c", "#ffffff"),
+                ".js": (" JS ", "#f1e05a", "#000000"),
+                ".jsx": ("JSX ", "#f1e05a", "#000000"),
+                ".ts": (" TS ", "#3178c6", "#ffffff"),
+                ".tsx": ("TSX ", "#3178c6", "#ffffff"),
+                ".json": ("JSON", "#29beb0", "#000000"),
+                ".toml": ("TOML", "#9c4221", "#ffffff"),
+                ".yaml": ("YAML", "#cb171e", "#ffffff"),
+                ".yml": ("YML ", "#cb171e", "#ffffff"),
+                ".md": (" MD ", "#083fa1", "#ffffff"),
+                ".txt": ("TXT ", "#585b79", "#ffffff"),
+                ".sh": (" SH ", "#4eaa25", "#ffffff"),
+                ".bat": ("BAT ", "#4eaa25", "#ffffff"),
+                ".ps1": ("PS1 ", "#4eaa25", "#ffffff"),
+            }
+            badge_text, badge_bg, badge_fg = badge_config.get(ext, ("FILE", "#585b79", "#ffffff"))
             
-            path_lbl = tk.Label(row, text=change["path"], font=("Segoe UI", 8), fg=self.fg_color, bg=self.bg_color, anchor="w")
+            ind_lbl = tk.Label(row, text=indicator_symbol, font=("Segoe UI", 9, "bold") if sys.platform == "win32" else ("SF Pro Text", 10, "bold"), fg=indicator_color, bg=self.bg_color, width=2)
+            ind_lbl.pack(side=tk.LEFT, padx=(2, 2))
+            
+            badge_lbl = tk.Label(
+                row, text=badge_text,
+                font=("Courier New", 7, "bold") if sys.platform == "win32" else ("Courier", 8, "bold"),
+                fg=badge_fg, bg=badge_bg,
+                padx=3, pady=1
+            )
+            badge_lbl.pack(side=tk.LEFT, padx=(2, 4))
+            
+            path_lbl = tk.Label(row, text=change["path"], font=("Segoe UI", 8) if sys.platform == "win32" else ("SF Pro Text", 9), fg=self.fg_color, bg=self.bg_color, anchor="w")
             path_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
             
             stats_str = f"+{change['additions']} -{change['deletions']}"
-            stats_lbl = tk.Label(row, text=stats_str, font=("Segoe UI", 8), fg="#585b79", bg=self.bg_color)
+            stats_lbl = tk.Label(row, text=stats_str, font=("Segoe UI", 8) if sys.platform == "win32" else ("SF Pro Text", 9), fg="#585b79", bg=self.bg_color)
             stats_lbl.pack(side=tk.RIGHT, padx=4)
 
     def _reset_baseline(self, workspace_path: str):
@@ -1993,10 +2055,13 @@ class TokenStatusWidget:
         import urllib.error
         
         push_url = f"{server}/gravity/v1/workspace/push"
+        import uuid
+        trace_id = f"trace_{uuid.uuid4().hex}"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token}",
-            "Accept": "application/json"
+            "Accept": "application/json",
+            "x-trace-id": trace_id
         }
         
         push_payload = json.dumps({
@@ -2038,6 +2103,138 @@ class TokenStatusWidget:
     def handle_push_error(self, error_msg):
         self.set_transacting(False)
         messagebox.showerror("Push Error", error_msg, parent=self.root)
+
+    def show_test_output_window(self, event=None):
+        if not self.last_test_results:
+            return
+            
+        results = self.last_test_results
+        status = results.get("status", "unknown").upper()
+        cmd = results.get("command", "")
+        exit_code = results.get("exit_code", -1)
+        stdout = results.get("stdout", "")
+        stderr = results.get("stderr", "")
+        time_str = results.get("timestamp", "")
+        
+        popup = tk.Toplevel(self.root)
+        popup.title(f"Test Run: {status}")
+        popup.geometry("600x400")
+        popup.configure(bg=self.bg_color)
+        popup.attributes("-topmost", True)
+        
+        title_color = "#a6e3a1" if status == "PASSED" else "#f38ba8"
+        tk.Label(
+            popup, 
+            text=f"Test Status: {status} (Exit Code: {exit_code})",
+            font=("Segoe UI", 11, "bold"),
+            fg=title_color,
+            bg=self.bg_color
+        ).pack(anchor="w", padx=15, pady=10)
+        
+        tk.Label(
+            popup,
+            text=f"Command: {cmd}\nTime: {time_str}",
+            font=("Segoe UI", 8),
+            fg="#a6adc8",
+            bg=self.bg_color,
+            justify=tk.LEFT
+        ).pack(anchor="w", padx=15, pady=(0, 10))
+        
+        tf = tk.Frame(popup, bg=self.bg_color)
+        tf.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 15))
+        
+        text_box = tk.Text(
+            tf,
+            font=("Consolas", 9),
+            fg="#cdd6f4",
+            bg="#11111b",
+            bd=0,
+            highlightthickness=0,
+            wrap=tk.WORD
+        )
+        text_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        scroll = tk.Scrollbar(tf, command=text_box.yview)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        text_box.configure(yscrollcommand=scroll.set)
+        
+        output_content = ""
+        if stdout.strip():
+            output_content += f"=== STDOUT ===\n{stdout}\n"
+        if stderr.strip():
+            output_content += f"=== STDERR ===\n{stderr}\n"
+        if not output_content.strip():
+            output_content = "No output captured."
+            
+        text_box.insert(tk.END, output_content)
+        text_box.configure(state=tk.DISABLED)
+
+    def fetch_test_status(self):
+        config = load_orbit_config()
+        server = config.get("server", "").rstrip("/")
+        token = config.get("token", "")
+        
+        repos_to_check = ["control", "rcore", "BetAssist", "rpanel", "paas"]
+        
+        latest_run = None
+        
+        import urllib.request
+        import urllib.parse
+        import urllib.error
+        import uuid
+        
+        for repo in repos_to_check:
+            url = f"{server}/gravity/v1/workspace/test-results?repo_name={repo}"
+            trace_id = f"trace_{uuid.uuid4().hex}"
+            req = urllib.request.Request(
+                url, 
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "x-trace-id": trace_id
+                }, 
+                method="GET"
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=3) as response:
+                    res_data = json.loads(response.read().decode())
+                    if res_data.get("status") in ["running", "passed", "failed"]:
+                        timestamp = res_data.get("timestamp", "")
+                        if not latest_run or timestamp > latest_run.get("timestamp", ""):
+                            latest_run = res_data
+            except Exception:
+                pass
+                
+        if latest_run:
+            status = latest_run.get("status")
+            self.last_test_results = latest_run
+            
+            if status == "running":
+                self.test_status_text = " Tests: ◌ Running "
+                self.test_status_color = "#89b4fa"
+            elif status == "passed":
+                self.test_status_text = " Tests: ✓ Passed "
+                self.test_status_color = "#a6e3a1"
+            elif status == "failed":
+                self.test_status_text = " Tests: ✗ Failed "
+                self.test_status_color = "#f38ba8"
+                
+                prev_status = getattr(self, "prev_test_status", "")
+                if prev_status != "failed":
+                    self.trigger_test_failure_notification(latest_run)
+            
+            self.prev_test_status = status
+        else:
+            self.test_status_text = ""
+            self.last_test_results = {}
+
+    def trigger_test_failure_notification(self, run_info):
+        def show_alert():
+            messagebox.showwarning(
+                "Gravity Test Failure Alert",
+                f"Test suite failed!\nCommand: {run_info.get('command')}\n\nClick the 'Tests: ✗ Failed' badge on the Orbit widget to view the error logs.",
+                parent=self.root
+            )
+        self.root.after(0, show_alert)
 
 
 def run_widget():

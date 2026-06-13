@@ -11,6 +11,9 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 import email.utils
 
+# Global cache for tracking raw file content on-read to compute delta patches on-write
+VFS_FILE_CACHE = {}
+
 class OrbitWebDAVHandler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
 
@@ -29,6 +32,7 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         return {}
 
     def _api_request(self, method, endpoint, params=None, data=None):
+        import uuid
         config = self._get_config()
         server = config.get("server", "").rstrip("/")
         token = config.get("token", "")
@@ -39,9 +43,11 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         if params:
             url += "?" + urllib.parse.urlencode(params)
 
+        trace_id = f"trace_{uuid.uuid4().hex}"
         headers = {
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "x-trace-id": trace_id
         }
 
         req_data = None
@@ -151,7 +157,10 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
             self.send_error(404, f"File not found: {err}")
             return
 
-        content = res.get("content", "").encode("utf-8")
+        raw_content = res.get("content", "")
+        VFS_FILE_CACHE[path] = raw_content
+        content = raw_content.encode("utf-8")
+        
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(content)))
@@ -171,17 +180,42 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length).decode('utf-8', errors='ignore')
 
+        is_special_file = file_path.endswith("hooks.py") or file_path.endswith("modules.txt")
+        original_content = VFS_FILE_CACHE.get(path)
+
+        if not is_special_file and original_content is not None:
+            import difflib
+            diff_list = list(difflib.unified_diff(
+                original_content.splitlines(keepends=True),
+                body.splitlines(keepends=True),
+                fromfile=file_path,
+                tofile=file_path,
+                lineterm=""
+            ))
+            if not diff_list:
+                self.send_response(204)
+                self.end_headers()
+                return
+            
+            diff_text = "\n".join(diff_list) + "\n"
+            content_to_send = diff_text
+            change_type = "patch"
+        else:
+            content_to_send = body
+            change_type = "modified"
+
         data = {
             "repo_name": repo_name,
             "path": file_path,
-            "content": body,
-            "type": "modified"
+            "content": content_to_send,
+            "type": change_type
         }
         res, err = self._api_request("POST", "/v1/workspace/file", data=data)
         if err:
             self.send_error(500, f"Failed to save changes to Gravity: {err}")
             return
 
+        VFS_FILE_CACHE[path] = body
         self.send_response(204)
         self.end_headers()
 
