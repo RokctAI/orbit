@@ -49,21 +49,61 @@ def login(server, token):
 
 
 @cli.command()
-@click.option("--workspace", default="~/orbit", help="Local workspace directory")
-def mount(workspace):
-    """Fetch allowed repos → local workspace."""
+def mount():
+    """Mount the Gravity workspace as a local virtual network drive."""
     config = _load_orbit_config()
     if not config.get("server"):
         click.echo("❌ Not logged in. Run 'orbit login' first.")
         return
 
-    workspace = os.path.expanduser(workspace)
-    os.makedirs(workspace, exist_ok=True)
+    # Start VFS server in a background daemon thread
+    import threading
+    import time
+    import subprocess
+    import re
+    from orbit.vfs import start_vfs_server
 
-    # Phase 2: fetch repo list from Gravity server API
-    click.echo(f"\n🛸 Connecting to {config['server']}...")
-    click.echo("   ⏳ Phase 2: Server-side mount coming soon.")
-    click.echo(f"   Workspace ready at: {workspace}")
+    server_thread = threading.Thread(
+        target=start_vfs_server, 
+        kwargs={"host": "127.0.0.1", "port": 8080}, 
+        daemon=True
+    )
+    server_thread.start()
+    
+    # Wait for the local server to spin up
+    time.sleep(1.5)
+    
+    click.echo("🛸 Mounting Gravity workspace via WebDAV on localhost:8080...")
+    
+    # Run net use command to assign next available drive letter
+    result = subprocess.run(
+        ["net", "use", "*", "http://127.0.0.1:8080/", "/persistent:no"], 
+        capture_output=True, 
+        text=True
+    )
+    
+    if result.returncode != 0:
+        click.echo(f"❌ Failed to mount drive: {result.stderr.strip() or result.stdout.strip()}")
+        click.echo("   Ensure the Windows 'WebClient' service is running.")
+        click.echo("   To start it, open cmd/PowerShell as Administrator and run: net start WebClient")
+        return
+        
+    output = result.stdout
+    drive_match = re.search(r'([A-Z]:)', output)
+    drive_letter = drive_match.group(1) if drive_match else "Virtual Drive"
+    
+    click.echo(f"🎉 Success! Gravity virtual workspace is mounted at {drive_letter}")
+    click.echo("   You can now open it in VS Code, Cursor, or File Explorer!")
+    click.echo("   Press Ctrl+C to unmount and exit.")
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        click.echo(f"\n🛸 Unmounting drive {drive_letter}...")
+        if drive_letter != "Virtual Drive":
+            subprocess.run(["net", "use", drive_letter, "/delete", "/y"], capture_output=True)
+        click.echo("👋 Exited.")
 
 
 @cli.command()
