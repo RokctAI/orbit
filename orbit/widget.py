@@ -1689,48 +1689,106 @@ class TokenStatusWidget:
             return
 
         # Compare and calculate diffs
+        # 1. Detect renames/moves first
+        deleted_by_hash = {}
+        for rel_path, base_data in baseline.items():
+            if rel_path not in current_snapshot:
+                deleted_by_hash.setdefault(base_data["hash"], []).append(rel_path)
+
+        moved_from = set()
+        moved_to = set()
         changes = []
-        
-        # 1. Added and Modified files
+
         for rel_path, curr_data in current_snapshot.items():
-            base_data = baseline.get(rel_path)
-            if not base_data:
-                additions = len(curr_data["lines"])
+            if rel_path not in baseline:
+                h = curr_data["hash"]
+                if h in deleted_by_hash and deleted_by_hash[h]:
+                    old_rel_path = deleted_by_hash[h].pop(0)
+                    moved_from.add(old_rel_path)
+                    moved_to.add(rel_path)
+                    changes.append({
+                        "path": old_rel_path,
+                        "new_path": rel_path,
+                        "type": "moved",
+                        "additions": 0,
+                        "deletions": 0,
+                        "content": ""
+                    })
+
+        # 2. Add remaining added files
+        for rel_path, curr_data in current_snapshot.items():
+            if rel_path not in baseline and rel_path not in moved_to:
                 changes.append({
                     "path": rel_path,
                     "type": "added",
-                    "additions": additions,
+                    "additions": len(curr_data["lines"]),
                     "deletions": 0,
                     "content": curr_data["content"]
                 })
-            elif base_data["hash"] != curr_data["hash"]:
-                base_lines = base_data.get("lines", [])
-                curr_lines = curr_data["lines"]
-                
-                diff = list(difflib.ndiff(base_lines, curr_lines))
-                additions = sum(1 for line in diff if line.startswith("+ "))
-                deletions = sum(1 for line in diff if line.startswith("- "))
-                
-                changes.append({
-                    "path": rel_path,
-                    "type": "modified",
-                    "additions": additions,
-                    "deletions": deletions,
-                    "content": curr_data["content"]
-                })
-                
-        # 2. Deleted files
+
+        # 3. Add remaining deleted files
         for rel_path, base_data in baseline.items():
-            if rel_path not in current_snapshot:
-                deletions = len(base_data.get("lines", []))
+            if rel_path not in current_snapshot and rel_path not in moved_from:
                 changes.append({
                     "path": rel_path,
                     "type": "deleted",
                     "additions": 0,
-                    "deletions": deletions,
+                    "deletions": len(base_data.get("lines", [])),
                     "content": ""
                 })
+
+        # 4. Modified files -> generates patch
+        for rel_path, curr_data in current_snapshot.items():
+            base_data = baseline.get(rel_path)
+            if base_data and base_data["hash"] != curr_data["hash"]:
+                base_lines = base_data.get("lines", [])
+                curr_lines = curr_data["lines"]
                 
+                # Compute additions/deletions counts for UX representation
+                diff_count = list(difflib.ndiff(base_lines, curr_lines))
+                additions = sum(1 for line in diff_count if line.startswith("+ "))
+                deletions = sum(1 for line in diff_count if line.startswith("- "))
+                
+                # Compute the unified diff patch
+                patch_str = ""
+                try:
+                    import sys
+                    # Add Rust library path to sys.path if not there
+                    rust_lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "orbit_diff_rs")
+                    if rust_lib_dir not in sys.path:
+                        sys.path.append(rust_lib_dir)
+                    import orbit_diff_rs
+                    
+                    base_content = "\n".join(base_lines)
+                    if base_lines:
+                        base_content += "\n"
+                    patch_str = orbit_diff_rs.compute_diff(
+                        base_content,
+                        curr_data["content"],
+                        f"a/{rel_path}",
+                        f"b/{rel_path}"
+                    )
+                except Exception:
+                    # Fallback to pure Python difflib
+                    base_lines_newline = [l + "\n" for l in base_lines]
+                    curr_lines_newline = [l + "\n" for l in curr_lines]
+                    diff_lines = list(difflib.unified_diff(
+                        base_lines_newline,
+                        curr_lines_newline,
+                        fromfile=f"a/{rel_path}",
+                        tofile=f"b/{rel_path}",
+                        lineterm=""
+                    ))
+                    patch_str = "".join(diff_lines)
+                
+                changes.append({
+                    "path": rel_path,
+                    "type": "patch",
+                    "additions": additions,
+                    "deletions": deletions,
+                    "content": patch_str
+                })
+
         self.pending_changes = changes
 
     def start_http_server(self):
