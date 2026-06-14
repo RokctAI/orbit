@@ -1543,12 +1543,13 @@ class TokenStatusWidget:
         # Scheduling: Calculate for 5 minutes, then sleep for 30 minutes
         last_break_time = time.time()
         
+        is_occultation = os.path.basename(workspace_path.rstrip("/\\")).lower() in ("occultation", "occultation_private")
         try:
             for root_dir, dirs, files in os.walk(workspace_path):
                 if getattr(self, "cancel_calculation", False):
                     break
                 # Filter out ignored directories in-place
-                dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
+                dirs[:] = [d for d in dirs if d not in ignore_dirs and (not d.startswith(".") or (d == ".rokct" and is_occultation))]
                 
                 for file in files:
                     if getattr(self, "cancel_calculation", False):
@@ -1641,10 +1642,11 @@ class TokenStatusWidget:
         
         baseline = load_baseline_snapshot()
         
+        is_occultation = os.path.basename(workspace_path.rstrip("/\\")).lower() in ("occultation", "occultation_private")
         # Compute current files snapshot
         current_snapshot = {}
         for root_dir, dirs, files in os.walk(workspace_path):
-            dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
+            dirs[:] = [d for d in dirs if d not in ignore_dirs and (not d.startswith(".") or (d == ".rokct" and is_occultation))]
             for file in files:
                 ext = os.path.splitext(file)[1].lower()
                 if ext not in allowed_extensions:
@@ -2002,9 +2004,10 @@ class TokenStatusWidget:
         import hashlib
         ignore_dirs = IGNORE_DIRS
         allowed_extensions = ALLOWED_EXTENSIONS
+        is_occultation = os.path.basename(workspace_path.rstrip("/\\")).lower() in ("occultation", "occultation_private")
         new_baseline = {}
         for root_dir, dirs, files in os.walk(workspace_path):
-            dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
+            dirs[:] = [d for d in dirs if d not in ignore_dirs and (not d.startswith(".") or (d == ".rokct" and is_occultation))]
             for file in files:
                 ext = os.path.splitext(file)[1].lower()
                 if ext not in allowed_extensions:
