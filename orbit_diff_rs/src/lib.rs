@@ -12,17 +12,23 @@ fn compute_diff(a: &str, b: &str, from_file: &str, to_file: &str) -> PyResult<St
 
 #[pyfunction]
 fn compute_binary_diff(old_bytes: &[u8], new_bytes: &[u8]) -> PyResult<Vec<u8>> {
-    let mut patch = Vec::new();
+    let mut raw_patch = Vec::new();
     Bsdiff::new(old_bytes, new_bytes)
-        .compare(Cursor::new(&mut patch))
+        .compare(Cursor::new(&mut raw_patch))
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bsdiff failed: {}", e)))?;
-    Ok(patch)
+        
+    let compressed_patch = zstd::encode_all(Cursor::new(raw_patch), 3)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("zstd compression failed: {}", e)))?;
+    Ok(compressed_patch)
 }
 
 #[pyfunction]
 fn apply_binary_patch_rs(old_bytes: &[u8], patch_bytes: &[u8]) -> PyResult<Vec<u8>> {
+    let decompressed_patch = zstd::decode_all(Cursor::new(patch_bytes))
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("zstd decompression failed: {}", e)))?;
+        
     let mut output = Cursor::new(Vec::new());
-    Bspatch::new(patch_bytes)
+    Bspatch::new(&decompressed_patch)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid patch: {}", e)))?
         .apply(old_bytes, &mut output)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bspatch failed: {}", e)))?;
