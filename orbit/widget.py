@@ -764,6 +764,10 @@ class TokenStatusWidget:
             except Exception:
                 pass
             try:
+                self.fetch_pr_comments()
+            except Exception:
+                pass
+            try:
                 server = config.get("server", "").rstrip("/")
                 token = config.get("token", "")
                 repo_name = os.path.basename(workspace_dir) if workspace_dir else "control"
@@ -1015,6 +1019,7 @@ class TokenStatusWidget:
             self.menu.add_command(label="Clear Workspace", command=self.clear_workspace)
             self.menu.add_command(label="Toggle Tasks List", command=self.toggle_todo_list)
             self.menu.add_command(label="Toggle Changes Panel", command=self.toggle_changes_panel)
+            self.menu.add_command(label="Toggle PR Comments", command=self.toggle_pr_comments_panel)
             
         if config.get("token"):
             self.menu.add_command(label="Logout", command=self.logout)
@@ -2248,6 +2253,204 @@ class TokenStatusWidget:
                 parent=self.root
             )
         self.root.after(0, show_alert)
+
+    def toggle_pr_comments_panel(self, event=None):
+        self.pr_comments_expanded = not getattr(self, "pr_comments_expanded", False)
+        if self.collapse_timer:
+            self.root.after_cancel(self.collapse_timer)
+            self.collapse_timer = None
+            
+        if self.pr_comments_expanded:
+            self.is_compact = False
+            if self.todo_expanded:
+                self.toggle_todo_list()
+            if self.login_expanded:
+                self.toggle_login_expansion()
+            if getattr(self, "net_expanded", False):
+                self.toggle_net_panel()
+            if getattr(self, "changes_expanded", False):
+                self.toggle_changes_panel()
+                
+            if not hasattr(self, "pr_comments_frame"):
+                self.setup_pr_comments_ui()
+            self.pr_comments_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self.refresh_pr_comments_list()
+        else:
+            if hasattr(self, "pr_comments_frame"):
+                self.pr_comments_frame.pack_forget()
+                
+        self.update_layout()
+        return "break"
+
+    def setup_pr_comments_ui(self):
+        self.pr_comments_frame = tk.Frame(self.root, bg=self.bg_color, bd=0)
+        
+        header_frame = tk.Frame(self.pr_comments_frame, bg=self.bg_color)
+        header_frame.pack(fill=tk.X, padx=10, pady=(8, 2))
+        
+        tk.Label(
+            header_frame, text="PR Feedback & Reviews",
+            font=("Segoe UI", 9, "bold") if sys.platform == "win32" else ("SF Pro Text", 10, "bold"),
+            fg=self.accent_color, bg=self.bg_color
+        ).pack(side=tk.LEFT)
+        
+        self.pr_comments_total_lbl = tk.Label(
+            header_frame, text="0 comments",
+            font=("Segoe UI", 7) if sys.platform == "win32" else ("SF Pro Text", 8),
+            fg="#585b79", bg=self.bg_color
+        )
+        self.pr_comments_total_lbl.pack(side=tk.RIGHT)
+        
+        self.pr_comments_canvas = tk.Canvas(self.pr_comments_frame, bg=self.bg_color, bd=0, highlightthickness=0)
+        self.pr_comments_scrollbar = tk.Scrollbar(self.pr_comments_frame, orient="vertical", command=self.pr_comments_canvas.yview, width=6, bd=0, elementborderwidth=0)
+        self.pr_comments_list_frame = tk.Frame(self.pr_comments_canvas, bg=self.bg_color)
+        
+        self.pr_comments_canvas.create_window((0, 0), window=self.pr_comments_list_frame, anchor="nw", tags="self.pr_comments_list_frame")
+        self.pr_comments_canvas.configure(yscrollcommand=self.pr_comments_scrollbar.set)
+        
+        self.pr_comments_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=(10, 0), pady=2)
+        self.pr_comments_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(2, 4))
+        
+        self.pr_comments_canvas.bind("<Configure>", lambda e: self.pr_comments_canvas.itemconfig("self.pr_comments_list_frame", width=e.width))
+        self.pr_comments_list_frame.bind("<Configure>", lambda e: self.pr_comments_canvas.configure(scrollregion=self.pr_comments_canvas.bbox("all")))
+        
+        def _on_mousewheel(event):
+            self.pr_comments_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self.pr_comments_canvas.bind("<Enter>", lambda e: self.pr_comments_canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        self.pr_comments_canvas.bind("<Leave>", lambda e: self.pr_comments_canvas.unbind_all("<MouseWheel>"))
+
+    def refresh_pr_comments_list(self):
+        for w in self.pr_comments_list_frame.winfo_children():
+            w.destroy()
+            
+        comments = getattr(self, "pr_comments", [])
+        if not comments:
+            lbl = tk.Label(self.pr_comments_list_frame, text="No review comments on active branch.", font=("Segoe UI", 8), fg="#585b79", bg=self.bg_color)
+            lbl.pack(pady=20)
+            self.pr_comments_total_lbl.config(text="0 comments")
+            return
+            
+        self.pr_comments_total_lbl.config(text=f"{len(comments)} comments")
+        
+        for idx, comment in enumerate(comments):
+            card = tk.Frame(self.pr_comments_list_frame, bg="#1e1e2e", bd=1, relief=tk.SOLID, highlightbackground="#313244", highlightthickness=1)
+            card.pack(fill=tk.X, padx=5, pady=4)
+            
+            header = tk.Frame(card, bg="#1e1e2e")
+            header.pack(fill=tk.X, padx=8, pady=(4, 2))
+            
+            user_lbl = tk.Label(header, text=comment["user"], font=("Segoe UI", 8, "bold"), fg=self.accent_color, bg="#1e1e2e")
+            user_lbl.pack(side=tk.LEFT)
+            
+            type_lbl = tk.Label(header, text=comment.get("type", "comment").upper(), font=("Segoe UI", 6, "bold"), fg="#585b79", bg="#1e1e2e")
+            type_lbl.pack(side=tk.RIGHT, padx=4)
+            
+            if comment.get("path") and comment.get("line") is not None:
+                path_str = f"{os.path.basename(comment['path'])}:L{comment['line']}"
+                path_lbl = tk.Label(card, text=path_str, font=("Segoe UI", 7, "underline"), fg="#89b4fa", bg="#1e1e2e", cursor="hand2")
+                path_lbl.pack(anchor="w", padx=8, pady=(0, 2))
+                path_lbl.bind("<Button-1>", lambda e, p=comment['path'], l=comment['line']: self.open_local_file_at_line(p, l))
+                
+            body_lbl = tk.Label(card, text=comment["body"], font=("Segoe UI", 8), fg=self.fg_color, bg="#1e1e2e", justify=tk.LEFT, anchor="w", wraplength=260)
+            body_lbl.pack(fill=tk.X, padx=8, pady=(2, 6))
+            
+            actions = tk.Frame(card, bg="#1e1e2e")
+            actions.pack(fill=tk.X, padx=8, pady=(0, 4))
+            
+            reply_btn = tk.Label(actions, text="Reply", font=("Segoe UI", 7, "bold"), fg="#a6e3a1", bg="#1e1e2e", cursor="hand2")
+            reply_btn.pack(side=tk.RIGHT)
+            reply_btn.bind("<Button-1>", lambda e, c=comment: self.prompt_pr_reply(c))
+
+    def open_local_file_at_line(self, relative_path, line_number):
+        config = load_orbit_config()
+        workspace_dir = config.get("workspace")
+        if not workspace_dir:
+            return
+            
+        full_path = os.path.join(workspace_dir, relative_path)
+        if not os.path.isfile(full_path):
+            return
+            
+        import subprocess
+        try:
+            subprocess.run(["code", "-g", f"{full_path}:{line_number}"], shell=True)
+        except Exception:
+            try:
+                os.startfile(full_path)
+            except Exception:
+                pass
+
+    def prompt_pr_reply(self, comment):
+        from tkinter import simpledialog
+        reply_text = simpledialog.askstring("Reply to PR Comment", f"Type your reply to {comment['user']}:", parent=self.root)
+        if reply_text and reply_text.strip():
+            threading.Thread(target=self._send_pr_reply_worker, args=(comment, reply_text.strip()), daemon=True).start()
+
+    def _send_pr_reply_worker(self, comment, text):
+        config = load_orbit_config()
+        server = config.get("server", "").rstrip("/")
+        token = config.get("token", "")
+        workspace_dir = config.get("workspace")
+        repo_name = os.path.basename(workspace_dir) if workspace_dir else "control"
+        
+        import urllib.request
+        import json
+        
+        url = f"{server}/gravity/v1/workspace/comments/reply"
+        payload = {
+            "repo_name": repo_name,
+            "comment_id": comment["id"] if comment.get("path") else None,
+            "pr_number": comment.get("pr_number"),
+            "body": text
+        }
+        
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            },
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                res_data = json.loads(response.read().decode())
+            if res_data.get("status"):
+                self.fetch_pr_comments()
+        except Exception as ex:
+            print(f"⚠️ Failed to send PR reply: {ex}")
+
+    def fetch_pr_comments(self):
+        config = load_orbit_config()
+        server = config.get("server", "").rstrip("/")
+        token = config.get("token", "")
+        workspace_dir = config.get("workspace")
+        repo_name = os.path.basename(workspace_dir) if workspace_dir else "control"
+        
+        import urllib.request
+        import uuid
+        import json
+        
+        url = f"{server}/gravity/v1/workspace/comments?repo_name={repo_name}"
+        trace_id = f"trace_{uuid.uuid4().hex}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "x-trace-id": trace_id
+            },
+            method="GET"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                res_data = json.loads(response.read().decode())
+            if res_data.get("status"):
+                self.pr_comments = res_data.get("comments", [])
+                if getattr(self, "pr_comments_expanded", False):
+                    self.root.after(0, self.refresh_pr_comments_list)
+        except Exception:
+            pass
 
 
 def run_widget():
