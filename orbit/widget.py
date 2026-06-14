@@ -11,6 +11,7 @@ import getpass
 import tkinter as tk
 from tkinter import messagebox
 from tkinter import filedialog
+from tkinter import simpledialog
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import psutil
 
@@ -377,6 +378,7 @@ class TokenStatusWidget:
         
         # Load cached country code from config to prevent lookup delay
         self.country_code = config.get("country_code", "")
+        self.staged_paths = set()
         
         self.logged_in = False
         self.is_compact = False
@@ -2130,9 +2132,35 @@ class TokenStatusWidget:
             lbl.pack(fill=tk.X, pady=10)
             return
             
+        # Select all by default for newly detected changes if self.staged_paths is empty
+        all_paths = {c["path"] for c in changes}
+        if not self.staged_paths:
+            self.staged_paths = all_paths.copy()
+        else:
+            # Clean up paths that are no longer changed
+            self.staged_paths = self.staged_paths.intersection(all_paths)
+            
         for change in changes:
             row = tk.Frame(self.changes_list_frame, bg=self.bg_color, bd=0)
             row.pack(fill=tk.X, pady=1, padx=(0, 4))
+            
+            # Checkbox to Stage/Unstage
+            path = change["path"]
+            var = tk.BooleanVar(value=(path in self.staged_paths))
+            def make_toggle(p=path, v=var):
+                def toggle():
+                    if v.get():
+                        self.staged_paths.add(p)
+                    else:
+                        self.staged_paths.discard(p)
+                return toggle
+                
+            cb = tk.Checkbutton(
+                row, variable=var, command=make_toggle(path, var),
+                bg=self.bg_color, selectcolor=self.hover_color, activebackground=self.bg_color,
+                highlightthickness=0, bd=0
+            )
+            cb.pack(side=tk.LEFT, padx=(2, 0))
             
             if change["type"] == "added":
                 indicator_color = "#a6e3a1"
@@ -2208,11 +2236,53 @@ class TokenStatusWidget:
             stats_lbl = tk.Label(row, text=stats_str, font=("Segoe UI", 8) if sys.platform == "win32" else ("SF Pro Text", 9), fg="#585b79", bg=self.bg_color)
             stats_lbl.pack(side=tk.RIGHT, padx=4)
 
-    def _reset_baseline(self, workspace_path: str):
+    def _reset_baseline(self, workspace_path: str, target_paths: list = None):
         import hashlib
         import base64
         ignore_dirs = IGNORE_DIRS
         allowed_extensions = ALLOWED_EXTENSIONS
+        
+        if target_paths is not None:
+            # Partial reset
+            current_baseline = load_baseline_snapshot()
+            for rel_path in target_paths:
+                file_path = os.path.join(workspace_path, rel_path)
+                if not os.path.exists(file_path):
+                    # File was deleted, remove from baseline
+                    current_baseline.pop(rel_path, None)
+                    continue
+                ext = os.path.splitext(rel_path)[1].lower()
+                if ext not in allowed_extensions:
+                    continue
+                try:
+                     is_binary = ext in BINARY_EXTENSIONS
+                     if is_binary:
+                         with open(file_path, "rb") as f:
+                             content_bytes = f.read()
+                         content = base64.b64encode(content_bytes).decode("utf-8")
+                         lines = []
+                     else:
+                         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                             content = f.read()
+                         lines = content.splitlines()
+                         content_bytes = content.encode("utf-8")
+                         
+                     hasher = hashlib.sha256()
+                     hasher.update(content_bytes)
+                     file_hash_val = hasher.hexdigest()
+                     
+                     current_baseline[rel_path] = {
+                         "hash": file_hash_val,
+                         "lines": lines,
+                         "is_binary": is_binary
+                     }
+                     if is_binary:
+                         current_baseline[rel_path]["content"] = content
+                except Exception:
+                     pass
+            save_baseline_snapshot(current_baseline)
+            return
+
         is_occultation = os.path.basename(workspace_path.rstrip("/\\")).lower() in ("occultation", "occultation_private")
         new_baseline = {}
         for root_dir, dirs, files in os.walk(workspace_path):
@@ -2537,18 +2607,37 @@ class TokenStatusWidget:
             messagebox.showinfo("Push", "No changes to push.", parent=self.root)
             return
             
-        if not messagebox.askyesno("Confirm Push", f"Are you sure you want to push {len(self.pending_changes)} modified files to Gravity?", parent=self.root):
+        # Filter changes to only include those in self.staged_paths
+        staged_changes = [c for c in self.pending_changes if c["path"] in self.staged_paths]
+        if not staged_changes:
+            messagebox.showwarning("Push Warning", "No changes selected/staged to push.", parent=self.root)
             return
+            
+        # Prompt for custom commit message
+        default_msg = f"Orbit sync update: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+        commit_msg = simpledialog.askstring(
+            "Commit Message", 
+            f"Enter commit message for pushing {len(staged_changes)} files:", 
+            initialvalue=default_msg,
+            parent=self.root
+        )
+        if commit_msg is None:
+            # Cancelled
+            return
+        if not commit_msg.strip():
+            commit_msg = default_msg
             
         self.set_transacting(True)
         
         payload_changes = []
-        for change in self.pending_changes:
+        pushed_paths = []
+        for change in staged_changes:
             payload_changes.append({
                 "path": change["path"],
                 "content": change["content"],
                 "type": change["type"]
             })
+            pushed_paths.append(change["path"])
             
         import urllib.request
         import urllib.error
@@ -2565,7 +2654,7 @@ class TokenStatusWidget:
         
         push_payload = json.dumps({
             "changes": payload_changes,
-            "message": f"Orbit sync update: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            "message": commit_msg
         }).encode("utf-8")
         
         def do_push_thread():
@@ -2582,7 +2671,7 @@ class TokenStatusWidget:
                     
                 self.is_offline = False
                 self.conflicts = set()
-                self.root.after(0, lambda: self.handle_push_success(workspace_path))
+                self.root.after(0, lambda: self.handle_push_success(workspace_path, pushed_paths))
             except urllib.error.HTTPError as e:
                 try:
                     err_data = json.loads(e.read().decode())
@@ -2595,10 +2684,17 @@ class TokenStatusWidget:
                 
         threading.Thread(target=do_push_thread, daemon=True).start()
 
-    def handle_push_success(self, workspace_path):
+    def handle_push_success(self, workspace_path, pushed_paths=None):
         self.set_transacting(False)
-        self._reset_baseline(workspace_path)
-        self.pending_changes = []
+        self._reset_baseline(workspace_path, pushed_paths)
+        if pushed_paths:
+            pushed_set = set(pushed_paths)
+            self.pending_changes = [c for c in self.pending_changes if c["path"] not in pushed_set]
+            self.staged_paths = self.staged_paths.difference(pushed_set)
+        else:
+            self.pending_changes = []
+            self.staged_paths.clear()
+            
         if self.changes_expanded:
             self.toggle_changes_panel()
         self.refresh()
