@@ -28,6 +28,19 @@ THEME_FILE = os.path.join(CONFIG_DIR, "widget_theme.json")
 
 ACTIVE_WIDGET_INSTANCE = None
 
+IGNORE_DIRS = {
+    ".git", ".rokct", ".venv", "venv", "env", "__pycache__", 
+    "node_modules", "dist", "build", ".next", ".cache", "out",
+    "target", "bin", "obj", ".expo", ".output",
+    "logs", "temp", "tmp", "coverage", "web",
+    "res", "assets"
+}
+
+ALLOWED_EXTENSIONS = {
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".css", 
+    ".json", ".md", ".toml", ".yaml", ".yml", ".txt", ".ini"
+}
+
 class OrbitHTTPRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         # Suppress logging request info to console to keep it clean
@@ -1503,19 +1516,9 @@ class TokenStatusWidget:
         total_bytes = 0
         file_count = 0
         
-        # Ignored directories
-        ignore_dirs = {
-            ".git", ".rokct", ".venv", "venv", "env", "__pycache__", 
-            "node_modules", "dist", "build", ".next", ".cache", "out",
-            "target", "bin", "obj", "ios", "android", ".expo", ".output",
-            "logs", "temp", "tmp", "coverage"
-        }
-        
-        # Allowed file extensions
-        allowed_extensions = {
-            ".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".css", 
-            ".json", ".md", ".toml", ".yaml", ".yml", ".txt", ".ini"
-        }
+        # Ignored directories and extensions
+        ignore_dirs = IGNORE_DIRS
+        allowed_extensions = ALLOWED_EXTENSIONS
         
         # Load tiktoken encoding if available
         encoding = None
@@ -1632,17 +1635,9 @@ class TokenStatusWidget:
         import hashlib
         import difflib
         
-        # Ignored directories
-        ignore_dirs = {
-            ".git", ".rokct", ".venv", "venv", "env", "__pycache__", 
-            "node_modules", "dist", "build", ".next", ".cache", "out",
-            "target", "bin", "obj", "ios", "android", ".expo", ".output",
-            "logs", "temp", "tmp", "coverage"
-        }
-        allowed_extensions = {
-            ".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".css", 
-            ".json", ".md", ".toml", ".yaml", ".yml", ".txt", ".ini"
-        }
+        # Ignored directories and extensions
+        ignore_dirs = IGNORE_DIRS
+        allowed_extensions = ALLOWED_EXTENSIONS
         
         baseline = load_baseline_snapshot()
         
@@ -2005,16 +2000,8 @@ class TokenStatusWidget:
 
     def _reset_baseline(self, workspace_path: str):
         import hashlib
-        ignore_dirs = {
-            ".git", ".rokct", ".venv", "venv", "env", "__pycache__", 
-            "node_modules", "dist", "build", ".next", ".cache", "out",
-            "target", "bin", "obj", "ios", "android", ".expo", ".output",
-            "logs", "temp", "tmp", "coverage"
-        }
-        allowed_extensions = {
-            ".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".css", 
-            ".json", ".md", ".toml", ".yaml", ".yml", ".txt", ".ini"
-        }
+        ignore_dirs = IGNORE_DIRS
+        allowed_extensions = ALLOWED_EXTENSIONS
         new_baseline = {}
         for root_dir, dirs, files in os.walk(workspace_path):
             dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
