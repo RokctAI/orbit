@@ -119,20 +119,47 @@ def save_baseline_snapshot(snapshot: dict):
 
 
 def load_orbit_config() -> dict:
+    config = {}
     if os.path.isfile(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
-                return json.load(f)
+                config = json.load(f)
         except Exception:
             pass
-    return {}
+            
+    try:
+        import keyring
+        token = keyring.get_password("gravity", "token")
+        if token:
+            config["token"] = token
+    except Exception:
+        pass
+        
+    return config
 
 
 def save_orbit_config(data: dict):
     os.makedirs(CONFIG_DIR, exist_ok=True)
+    write_data = dict(data)
+    token = write_data.pop("token", None)
+    
+    if token is not None:
+        try:
+            import keyring
+            if token:
+                keyring.set_password("gravity", "token", token)
+            else:
+                try:
+                    keyring.delete_password("gravity", "token")
+                except Exception:
+                    pass
+        except Exception:
+            if token:
+                write_data["token"] = token
+                
     try:
         with open(CONFIG_FILE, "w") as f:
-            json.dump(data, f, indent=2)
+            json.dump(write_data, f, indent=2)
     except Exception:
         pass
 
@@ -768,6 +795,10 @@ class TokenStatusWidget:
             
         if self.logged_in:
             try:
+                self.check_and_replay_offline_journal()
+            except Exception:
+                pass
+            try:
                 self.fetch_test_status()
             except Exception:
                 pass
@@ -1249,6 +1280,7 @@ class TokenStatusWidget:
 
     def set_transacting(self, active: bool):
         self.is_transacting = active
+        idle_color = getattr(self, "offline_color", "#f38ba8") if getattr(self, "is_offline", False) else "#ff4600"
         if active:
             try:
                 self.status_line.configure(bg="#13F300")
@@ -1256,22 +1288,23 @@ class TokenStatusWidget:
                 pass
         else:
             try:
-                self.status_line.configure(bg="#ff4600")
+                self.status_line.configure(bg=idle_color)
             except Exception:
                 pass
 
     def run_blink_loop(self):
+        idle_color = getattr(self, "offline_color", "#f38ba8") if getattr(self, "is_offline", False) else "#ff4600"
         if getattr(self, "is_transacting", False):
             self.blink_state = not self.blink_state
             # Alternate between green and badge background
-            color = "#13F300" if self.blink_state else "#ff4600"
+            color = "#13F300" if self.blink_state else idle_color
             try:
                 self.status_line.configure(bg=color)
             except Exception:
                 return
         else:
             try:
-                self.status_line.configure(bg="#ff4600")
+                self.status_line.configure(bg=idle_color)
             except Exception:
                 return
         self.root.after(400, self.run_blink_loop)
@@ -2140,8 +2173,32 @@ class TokenStatusWidget:
             )
             badge_lbl.pack(side=tk.LEFT, padx=(2, 4))
             
-            path_lbl = tk.Label(row, text=change["path"], font=("Segoe UI", 8) if sys.platform == "win32" else ("SF Pro Text", 9), fg=self.fg_color, bg=self.bg_color, anchor="w")
+            is_conflicted = change["path"] in getattr(self, "conflicts", set())
+            path_fg = self.offline_color if is_conflicted else self.fg_color
+            path_lbl = tk.Label(row, text=change["path"], font=("Segoe UI", 8) if sys.platform == "win32" else ("SF Pro Text", 9), fg=path_fg, bg=self.bg_color, anchor="w")
             path_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            
+            if is_conflicted:
+                row.bind("<Double-Button-1>", lambda e, p=change["path"]: self.open_conflict_resolver(p))
+                path_lbl.bind("<Double-Button-1>", lambda e, p=change["path"]: self.open_conflict_resolver(p))
+                
+            dest = self.get_split_destination(change["path"])
+            dest_colors = {
+                "Public": ("#89b4fa", "#1e1e2e"),
+                "Private": ("#f38ba8", "#1e1e2e"),
+            }
+            if dest.startswith("Split"):
+                dest_bg, dest_fg = "#cba6f7", "#1e1e2e"
+            else:
+                dest_bg, dest_fg = dest_colors.get(dest, ("#585b79", "#ffffff"))
+                
+            dest_lbl = tk.Label(
+                row, text=dest.upper(),
+                font=("Segoe UI", 6, "bold") if sys.platform == "win32" else ("SF Pro Text", 7, "bold"),
+                fg=dest_fg, bg=dest_bg,
+                padx=3, pady=0
+            )
+            dest_lbl.pack(side=tk.RIGHT, padx=4)
             
             stats_str = f"+{change['additions']} -{change['deletions']}"
             stats_lbl = tk.Label(row, text=stats_str, font=("Segoe UI", 8) if sys.platform == "win32" else ("SF Pro Text", 9), fg="#585b79", bg=self.bg_color)
@@ -2191,6 +2248,273 @@ class TokenStatusWidget:
                      pass
         save_baseline_snapshot(new_baseline)
 
+    def get_split_destination(self, path: str) -> str:
+        parts = path.split("/", 1)
+        if len(parts) < 2:
+            return "Unknown"
+        repo_name = parts[0]
+        rel_path = parts[1]
+        
+        config = load_orbit_config()
+        workspace_path = config.get("workspace")
+        if not workspace_path or not os.path.isdir(workspace_path):
+            return "Public"
+            
+        repo_dir = os.path.join(workspace_path, repo_name)
+        orbitsplit_path = os.path.join(repo_dir, ".orbitsplit")
+        
+        split_cfg = {
+            "split_rules": {
+                "hooks.py": {"type": "hooks_split"},
+                "modules.txt": {"type": "modules_split"}
+            },
+            "private_patterns": [
+                "**/*_private.*",
+                "**/private/**"
+            ]
+        }
+        if os.path.isfile(orbitsplit_path):
+            try:
+                with open(orbitsplit_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        split_cfg.update(loaded)
+            except Exception:
+                pass
+                
+        import fnmatch
+        file_name = os.path.basename(rel_path)
+        
+        matched_rule = None
+        for rule_key, rule_val in split_cfg.get("split_rules", {}).items():
+            if rel_path == rule_key or file_name == rule_key or fnmatch.fnmatch(rel_path, rule_key):
+                matched_rule = rule_val
+                break
+                
+        if matched_rule:
+            return f"Split ({matched_rule.get('type')})"
+            
+        for pat in split_cfg.get("private_patterns", []):
+            if fnmatch.fnmatch(rel_path, pat) or fnmatch.fnmatch(file_name, pat):
+                return "Private"
+                
+        if "private" in rel_path.lower():
+            return "Private"
+            
+        return "Public"
+
+    def handle_push_conflict(self, conflicts):
+        self.set_transacting(False)
+        self.conflicts = set(conflicts)
+        self.refresh_changes_list()
+        messagebox.showerror(
+            "Push Conflict",
+            f"Merge conflict occurred on {len(conflicts)} file(s)!\nConflicting files are highlighted in red in your Changes Panel.\nDouble-click a file to resolve.",
+            parent=self.root
+        )
+
+    def save_to_offline_journal(self, changes, err_msg):
+        self.set_transacting(False)
+        self.is_offline = True
+        
+        journal_path = os.path.join(CONFIG_DIR, "offline_journal.json")
+        existing_journal = []
+        if os.path.isfile(journal_path):
+            try:
+                with open(journal_path, "r", encoding="utf-8") as f:
+                    existing_journal = json.load(f)
+            except Exception:
+                pass
+                
+        journal_dict = {c["path"]: c for c in existing_journal}
+        for change in changes:
+            journal_dict[change["path"]] = change
+            
+        try:
+            with open(journal_path, "w", encoding="utf-8") as f:
+                json.dump(list(journal_dict.values()), f, indent=2)
+        except Exception:
+            pass
+            
+        messagebox.showwarning(
+            "Offline Mode",
+            f"Failed to connect to Gravity: {err_msg}.\nChanges have been saved to offline journal and will auto-replay when connection is restored.",
+            parent=self.root
+        )
+        self.refresh()
+
+    def check_and_replay_offline_journal(self):
+        journal_path = os.path.join(CONFIG_DIR, "offline_journal.json")
+        if not os.path.isfile(journal_path):
+            return
+            
+        try:
+            with open(journal_path, "r", encoding="utf-8") as f:
+                changes = json.load(f)
+        except Exception:
+            return
+            
+        if not changes:
+            return
+            
+        config = load_orbit_config()
+        server = config.get("server")
+        token = config.get("token")
+        
+        if not token or not server:
+            return
+            
+        import urllib.request
+        import urllib.error
+        import uuid
+        
+        push_url = f"{server}/gravity/v1/workspace/push"
+        trace_id = f"trace_{uuid.uuid4().hex}"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "x-trace-id": trace_id
+        }
+        
+        push_payload = json.dumps({
+            "changes": changes,
+            "message": f"Orbit offline journal sync replay: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+        }).encode("utf-8")
+        
+        try:
+            req = urllib.request.Request(push_url, data=push_payload, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=10) as response:
+                res_data = json.loads(response.read().decode())
+            if res_data.get("status"):
+                try:
+                    os.remove(journal_path)
+                except Exception:
+                    pass
+                self.is_offline = False
+                self.root.after(0, self.refresh)
+        except Exception:
+            pass
+
+    def open_conflict_resolver(self, path):
+        import os
+        config = load_orbit_config()
+        workspace_path = config.get("workspace")
+        if not workspace_path:
+            return
+            
+        file_abs = os.path.join(workspace_path, path)
+        if not os.path.isfile(file_abs):
+            messagebox.showerror("Error", f"File not found: {path}", parent=self.root)
+            return
+            
+        is_binary = os.path.splitext(path)[1].lower() in BINARY_EXTENSIONS
+        
+        popup = tk.Toplevel(self.root)
+        popup.title(f"Resolve Conflict: {os.path.basename(path)}")
+        popup.geometry("800x600" if not is_binary else "500x450")
+        popup.configure(bg=self.bg_color)
+        popup.attributes("-topmost", True)
+        
+        header = tk.Frame(popup, bg=self.bg_color)
+        header.pack(fill=tk.X, padx=15, pady=15)
+        tk.Label(
+            header, text=f"Conflict Resolver — {path}",
+            font=("Segoe UI", 10, "bold") if sys.platform == "win32" else ("SF Pro Text", 11, "bold"),
+            fg=self.accent_color, bg=self.bg_color
+        ).pack(anchor="w")
+        
+        if is_binary:
+            stats = os.stat(file_abs)
+            size_kb = round(stats.st_size / 1024, 2)
+            mtime = time.ctime(stats.st_mtime)
+            
+            info_frame = tk.Frame(popup, bg=self.hover_color, padx=15, pady=15)
+            info_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+            
+            tk.Label(info_frame, text="Binary File Conflict detected.", font=("Segoe UI", 9, "bold"), fg=self.offline_color, bg=self.hover_color).pack(anchor="w", pady=(0, 5))
+            tk.Label(info_frame, text=f"Local Size: {size_kb} KB", font=("Segoe UI", 8), fg=self.fg_color, bg=self.hover_color).pack(anchor="w")
+            tk.Label(info_frame, text=f"Last Modified: {mtime}", font=("Segoe UI", 8), fg=self.fg_color, bg=self.hover_color).pack(anchor="w")
+            
+            ext = os.path.splitext(path)[1].lower()
+            if ext in (".png", ".jpg", ".jpeg", ".gif"):
+                try:
+                    from PIL import Image, ImageTk
+                    img = Image.open(file_abs)
+                    img.thumbnail((250, 150))
+                    photo = ImageTk.PhotoImage(img)
+                    img_lbl = tk.Label(info_frame, image=photo, bg=self.hover_color)
+                    img_lbl.image = photo
+                    img_lbl.pack(pady=10)
+                except Exception:
+                    pass
+            
+            btn_frame = tk.Frame(popup, bg=self.bg_color)
+            btn_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=15, pady=15)
+            
+            def choose_version(choice):
+                if choice == "server":
+                    pass
+                if path in getattr(self, "conflicts", set()):
+                    self.conflicts.remove(path)
+                popup.destroy()
+                self.refresh_changes_list()
+                
+            tk.Button(
+                btn_frame, text="Keep Local Version",
+                font=("Segoe UI", 8, "bold"),
+                fg=self.bg_color, bg="#a6e3a1", bd=0, padx=10, pady=5,
+                command=lambda: choose_version("local")
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+            
+            tk.Button(
+                btn_frame, text="Use Server Version",
+                font=("Segoe UI", 8, "bold"),
+                fg=self.bg_color, bg=self.offline_color, bd=0, padx=10, pady=5,
+                command=lambda: choose_version("server")
+            ).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
+            
+        else:
+            try:
+                with open(file_abs, "r", encoding="utf-8", errors="ignore") as f:
+                    file_text = f.read()
+            except Exception as e:
+                file_text = f"Error reading file: {e}"
+                
+            txt_frame = tk.Frame(popup, bg=self.bg_color)
+            txt_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+            
+            scrollbar = tk.Scrollbar(txt_frame)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            
+            text_area = tk.Text(txt_frame, font=("Courier New", 9), fg=self.fg_color, bg=self.hover_color, insertbackground=self.fg_color, bd=0, yscrollcommand=scrollbar.set)
+            text_area.insert("1.0", file_text)
+            text_area.pack(fill=tk.BOTH, expand=True)
+            scrollbar.config(command=text_area.yview)
+            
+            btn_frame = tk.Frame(popup, bg=self.bg_color)
+            btn_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=15, pady=15)
+            
+            def save_resolved():
+                new_text = text_area.get("1.0", tk.END)
+                try:
+                    with open(file_abs, "w", encoding="utf-8") as f:
+                        f.write(new_text.strip() + "\n")
+                    if path in getattr(self, "conflicts", set()):
+                        self.conflicts.remove(path)
+                    popup.destroy()
+                    self.refresh_changes_list()
+                    messagebox.showinfo("Resolved", f"Saved resolved version of {os.path.basename(path)}", parent=self.root)
+                except Exception as ex:
+                    messagebox.showerror("Error", f"Failed to save: {ex}", parent=popup)
+                    
+            tk.Button(
+                btn_frame, text="Save Resolved Version",
+                font=("Segoe UI", 8, "bold"),
+                fg=self.bg_color, bg="#a6e3a1", bd=0, padx=10, pady=5,
+                command=save_resolved
+            ).pack(fill=tk.X)
+
     def orbit_push(self):
         config = load_orbit_config()
         server = config.get("server")
@@ -2209,13 +2533,11 @@ class TokenStatusWidget:
             messagebox.showinfo("Push", "No changes to push.", parent=self.root)
             return
             
-        # Confirm push
         if not messagebox.askyesno("Confirm Push", f"Are you sure you want to push {len(self.pending_changes)} modified files to Gravity?", parent=self.root):
             return
             
         self.set_transacting(True)
         
-        # Build changes payload
         payload_changes = []
         for change in self.pending_changes:
             payload_changes.append({
@@ -2249,8 +2571,13 @@ class TokenStatusWidget:
                     res_data = json.loads(response.read().decode())
                     
                 if not res_data.get("status"):
+                    if res_data.get("conflict"):
+                        self.root.after(0, lambda: self.handle_push_conflict(res_data.get("conflicts", [])))
+                        return
                     raise Exception(res_data.get("message", "Unknown error occurred on Gravity"))
                     
+                self.is_offline = False
+                self.conflicts = set()
                 self.root.after(0, lambda: self.handle_push_success(workspace_path))
             except urllib.error.HTTPError as e:
                 try:
@@ -2260,7 +2587,7 @@ class TokenStatusWidget:
                     msg = e.reason
                 self.root.after(0, lambda: self.handle_push_error(f"Push failed: {msg}"))
             except Exception as e:
-                self.root.after(0, lambda: self.handle_push_error(f"Failed to connect to Gravity: {str(e)}"))
+                self.root.after(0, lambda: self.save_to_offline_journal(payload_changes, str(e)))
                 
         threading.Thread(target=do_push_thread, daemon=True).start()
 
