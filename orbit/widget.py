@@ -750,6 +750,29 @@ class TokenStatusWidget:
                 self.fetch_test_status()
             except Exception:
                 pass
+            try:
+                server = config.get("server", "").rstrip("/")
+                token = config.get("token", "")
+                repo_name = os.path.basename(workspace_dir) if workspace_dir else "control"
+                
+                import urllib.request
+                import uuid
+                url = f"{server}/gravity/v1/workspace/tokens?repo_name={repo_name}"
+                trace_id = f"trace_{uuid.uuid4().hex}"
+                req = urllib.request.Request(url, headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                    "x-trace-id": trace_id
+                })
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    res_data = json.loads(response.read().decode())
+                if res_data.get("status"):
+                    remote_tokens_count = res_data.get("tokens", 0)
+                    cfg_to_save = load_orbit_config()
+                    cfg_to_save["gravity_remote_tokens"] = remote_tokens_count
+                    save_orbit_config(cfg_to_save)
+            except Exception as ex:
+                pass
 
     def _apply_updates(self, tokens_str, size_str, is_done=True):
         self.tokens_str = tokens_str
