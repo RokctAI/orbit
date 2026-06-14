@@ -32,7 +32,7 @@ IGNORE_DIRS = {
     ".git", ".rokct", ".venv", "venv", "env", "__pycache__", 
     "node_modules", "dist", "build", ".next", ".cache", "out",
     "target", "bin", "obj", ".expo", ".output",
-    "logs", "temp", "tmp", "coverage", "web",
+    "logs", "temp", "tmp", "coverage",
     "res", "assets"
 }
 
