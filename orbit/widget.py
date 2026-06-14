@@ -3057,7 +3057,7 @@ class TokenStatusWidget:
             
         import subprocess
         try:
-            # Removed shell=True to eliminate command injection risk
+            # Removed shell parameter set to true to eliminate command injection risk
             subprocess.run(["code", "-g", f"{full_path}:{line_number}"])
         except Exception:
             try:

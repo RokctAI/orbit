@@ -9,7 +9,7 @@ import json
 import click
 
 
-CONFIG_DIR = os.path.expanduser("~/.orbit")
+CONFIG_DIR = os.path.abspath(os.path.expanduser("~/.orbit"))
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 
@@ -63,9 +63,15 @@ def mount():
     import re
     from orbit.vfs import start_vfs_server
 
+    def run_vfs_safely():
+        try:
+            start_vfs_server(host="127.0.0.1", port=8080)
+        except Exception as e:
+            import sys
+            sys.stderr.write(f"VFS Server error: {e}\n")
+
     server_thread = threading.Thread(
-        target=start_vfs_server, 
-        kwargs={"host": "127.0.0.1", "port": 8080}, 
+        target=run_vfs_safely, 
         daemon=True
     )
     server_thread.start()
