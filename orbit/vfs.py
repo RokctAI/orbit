@@ -11,8 +11,9 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 import email.utils
 
+
 class OrbitWebDAVHandler(BaseHTTPRequestHandler):
-    protocol_version = 'HTTP/1.1'
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, format, *args):
         # Suppress spammy terminal logs for smooth console output
@@ -41,7 +42,7 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
 
         headers = {
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
         req_data = None
@@ -65,7 +66,10 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("DAV", "1, 2")
         self.send_header("MS-Author-Via", "DAV")
-        self.send_header("Allow", "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, LOCK, UNLOCK")
+        self.send_header(
+            "Allow",
+            "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, LOCK, UNLOCK",
+        )
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -80,9 +84,21 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         if not parts:
             # Root directory (List of repositories)
             # Fetch config or active projects from local gravity.json
-            repos = ["rcore", "control", "shared-workflows", "rpanel", "paas_customer", 
-                     "paas_driver", "paas_manager", "paas_pos", "paas_webapp", "RokctAI_frontend", "bench", "The-Open-Language-Project"]
-            
+            repos = [
+                "rcore",
+                "control",
+                "shared-workflows",
+                "rpanel",
+                "paas_customer",
+                "paas_driver",
+                "paas_manager",
+                "paas_pos",
+                "paas_webapp",
+                "RokctAI_frontend",
+                "bench",
+                "The-Open-Language-Project",
+            ]
+
             xml_response = self._render_collection("/", repos if depth == "1" else [])
         elif len(parts) == 1:
             # Repository folder (List files from Gravity)
@@ -90,28 +106,34 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
             if depth == "0":
                 xml_response = self._render_single_dir(f"/{repo_name}/")
             else:
-                res, err = self._api_request("GET", "/v1/workspace/list", {"repo_name": repo_name})
+                res, err = self._api_request(
+                    "GET", "/v1/workspace/list", {"repo_name": repo_name}
+                )
                 if err:
                     self.send_error(500, f"Gravity error: {err}")
                     return
-                xml_response = self._render_files(f"/{repo_name}/", res.get("files", []))
+                xml_response = self._render_files(
+                    f"/{repo_name}/", res.get("files", [])
+                )
         else:
             # File or subdirectory path
             repo_name = parts[0]
             file_path = "/".join(parts[1:])
-            
+
             # Request file listing or specific file info
-            res, err = self._api_request("GET", "/v1/workspace/list", {"repo_name": repo_name})
+            res, err = self._api_request(
+                "GET", "/v1/workspace/list", {"repo_name": repo_name}
+            )
             if err:
                 self.send_error(404, "Not found")
                 return
-            
+
             files = res.get("files", [])
             matched = [f for f in files if f["path"] == file_path]
-            
+
             # Check if it is a folder path
             is_sub_dir = any(f["path"].startswith(file_path + "/") for f in files)
-            
+
             if is_sub_dir:
                 if depth == "0":
                     xml_response = self._render_single_dir(f"/{repo_name}/{file_path}/")
@@ -119,12 +141,16 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
                     children = []
                     for f in files:
                         if f["path"].startswith(file_path + "/"):
-                            sub_rel = f["path"][len(file_path)+1:]
+                            sub_rel = f["path"][len(file_path) + 1 :]
                             if "/" not in sub_rel:
                                 children.append(f)
-                    xml_response = self._render_files(f"/{repo_name}/{file_path}/", children)
+                    xml_response = self._render_files(
+                        f"/{repo_name}/{file_path}/", children
+                    )
             elif matched:
-                xml_response = self._render_file_metadata(f"/{repo_name}/{file_path}", matched[0])
+                xml_response = self._render_file_metadata(
+                    f"/{repo_name}/{file_path}", matched[0]
+                )
             else:
                 self.send_error(404, "Not found")
                 return
@@ -146,7 +172,9 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         repo_name = parts[0]
         file_path = "/".join(parts[1:])
 
-        res, err = self._api_request("GET", "/v1/workspace/file", {"repo_name": repo_name, "path": file_path})
+        res, err = self._api_request(
+            "GET", "/v1/workspace/file", {"repo_name": repo_name, "path": file_path}
+        )
         if err:
             self.send_error(404, f"File not found: {err}")
             return
@@ -168,14 +196,14 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         repo_name = parts[0]
         file_path = "/".join(parts[1:])
 
-        content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length).decode('utf-8', errors='ignore')
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length).decode("utf-8", errors="ignore")
 
         data = {
             "repo_name": repo_name,
             "path": file_path,
             "content": body,
-            "type": "modified"
+            "type": "modified",
         }
         res, err = self._api_request("POST", "/v1/workspace/file", data=data)
         if err:
@@ -237,33 +265,33 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         lines = []
         lines.append('<?xml version="1.0" encoding="utf-8" ?>')
         lines.append('<d:multistatus xmlns:d="DAV:">')
-        
+
         # Self entry
-        lines.append('  <d:response>')
-        lines.append(f'    <d:href>{prefix}</d:href>')
-        lines.append('    <d:propstat>')
-        lines.append('      <d:prop>')
-        lines.append('        <d:resourcetype><d:collection/></d:resourcetype>')
-        lines.append('      </d:prop>')
-        lines.append('      <d:status>HTTP/1.1 200 OK</d:status>')
-        lines.append('    </d:propstat>')
-        lines.append('  </d:response>')
+        lines.append("  <d:response>")
+        lines.append(f"    <d:href>{prefix}</d:href>")
+        lines.append("    <d:propstat>")
+        lines.append("      <d:prop>")
+        lines.append("        <d:resourcetype><d:collection/></d:resourcetype>")
+        lines.append("      </d:prop>")
+        lines.append("      <d:status>HTTP/1.1 200 OK</d:status>")
+        lines.append("    </d:propstat>")
+        lines.append("  </d:response>")
 
         # Children
         for folder in folders:
             href = f"{prefix}{folder}/"
-            lines.append('  <d:response>')
-            lines.append(f'    <d:href>{href}</d:href>')
-            lines.append('    <d:propstat>')
-            lines.append('      <d:prop>')
-            lines.append(f'        <d:displayname>{folder}</d:displayname>')
-            lines.append('        <d:resourcetype><d:collection/></d:resourcetype>')
-            lines.append('      </d:prop>')
-            lines.append('      <d:status>HTTP/1.1 200 OK</d:status>')
-            lines.append('    </d:propstat>')
-            lines.append('  </d:response>')
-            
-        lines.append('</d:multistatus>')
+            lines.append("  <d:response>")
+            lines.append(f"    <d:href>{href}</d:href>")
+            lines.append("    <d:propstat>")
+            lines.append("      <d:prop>")
+            lines.append(f"        <d:displayname>{folder}</d:displayname>")
+            lines.append("        <d:resourcetype><d:collection/></d:resourcetype>")
+            lines.append("      </d:prop>")
+            lines.append("      <d:status>HTTP/1.1 200 OK</d:status>")
+            lines.append("    </d:propstat>")
+            lines.append("  </d:response>")
+
+        lines.append("</d:multistatus>")
         return "\n".join(lines)
 
     def _render_single_dir(self, href):
@@ -271,17 +299,17 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         lines = [
             '<?xml version="1.0" encoding="utf-8" ?>',
             '<d:multistatus xmlns:d="DAV:">',
-            '  <d:response>',
-            f'    <d:href>{href}</d:href>',
-            '    <d:propstat>',
-            '      <d:prop>',
-            f'        <d:displayname>{name}</d:displayname>',
-            '        <d:resourcetype><d:collection/></d:resourcetype>',
-            '      </d:prop>',
-            '      <d:status>HTTP/1.1 200 OK</d:status>',
-            '    </d:propstat>',
-            '  </d:response>',
-            '</d:multistatus>'
+            "  <d:response>",
+            f"    <d:href>{href}</d:href>",
+            "    <d:propstat>",
+            "      <d:prop>",
+            f"        <d:displayname>{name}</d:displayname>",
+            "        <d:resourcetype><d:collection/></d:resourcetype>",
+            "      </d:prop>",
+            "      <d:status>HTTP/1.1 200 OK</d:status>",
+            "    </d:propstat>",
+            "  </d:response>",
+            "</d:multistatus>",
         ]
         return "\n".join(lines)
 
@@ -291,15 +319,15 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         lines.append('<d:multistatus xmlns:d="DAV:">')
 
         # Folder self response
-        lines.append('  <d:response>')
-        lines.append(f'    <d:href>{prefix}</d:href>')
-        lines.append('    <d:propstat>')
-        lines.append('      <d:prop>')
-        lines.append('        <d:resourcetype><d:collection/></d:resourcetype>')
-        lines.append('      </d:prop>')
-        lines.append('      <d:status>HTTP/1.1 200 OK</d:status>')
-        lines.append('    </d:propstat>')
-        lines.append('  </d:response>')
+        lines.append("  <d:response>")
+        lines.append(f"    <d:href>{prefix}</d:href>")
+        lines.append("    <d:propstat>")
+        lines.append("      <d:prop>")
+        lines.append("        <d:resourcetype><d:collection/></d:resourcetype>")
+        lines.append("      </d:prop>")
+        lines.append("      <d:status>HTTP/1.1 200 OK</d:status>")
+        lines.append("    </d:propstat>")
+        lines.append("  </d:response>")
 
         # File list
         for f in files:
@@ -307,25 +335,27 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
             if prefix.endswith(path_part + "/"):
                 continue
             name = os.path.basename(path_part)
-            
+
             # Map mtime to HTTP date format
             dt = datetime.fromtimestamp(f.get("mtime", 0))
             http_date = email.utils.format_datetime(dt)
 
-            lines.append('  <d:response>')
-            lines.append(f'    <d:href>{prefix}{name}</d:href>')
-            lines.append('    <d:propstat>')
-            lines.append('      <d:prop>')
-            lines.append(f'        <d:displayname>{name}</d:displayname>')
-            lines.append(f'        <d:getcontentlength>{f["size"]}</d:getcontentlength>')
-            lines.append('        <d:resourcetype/>')
-            lines.append(f'        <d:getlastmodified>{http_date}</d:getlastmodified>')
-            lines.append('      </d:prop>')
-            lines.append('      <d:status>HTTP/1.1 200 OK</d:status>')
-            lines.append('    </d:propstat>')
-            lines.append('  </d:response>')
+            lines.append("  <d:response>")
+            lines.append(f"    <d:href>{prefix}{name}</d:href>")
+            lines.append("    <d:propstat>")
+            lines.append("      <d:prop>")
+            lines.append(f"        <d:displayname>{name}</d:displayname>")
+            lines.append(
+                f"        <d:getcontentlength>{f['size']}</d:getcontentlength>"
+            )
+            lines.append("        <d:resourcetype/>")
+            lines.append(f"        <d:getlastmodified>{http_date}</d:getlastmodified>")
+            lines.append("      </d:prop>")
+            lines.append("      <d:status>HTTP/1.1 200 OK</d:status>")
+            lines.append("    </d:propstat>")
+            lines.append("  </d:response>")
 
-        lines.append('</d:multistatus>')
+        lines.append("</d:multistatus>")
         return "\n".join(lines)
 
     def _render_file_metadata(self, href, file_info):
@@ -335,19 +365,19 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         lines = [
             '<?xml version="1.0" encoding="utf-8" ?>',
             '<d:multistatus xmlns:d="DAV:">',
-            '  <d:response>',
-            f'    <d:href>{href}</d:href>',
-            '    <d:propstat>',
-            '      <d:prop>',
-            f'        <d:displayname>{name}</d:displayname>',
-            f'        <d:getcontentlength>{file_info["size"]}</d:getcontentlength>',
-            '        <d:resourcetype/>',
-            f'        <d:getlastmodified>{http_date}</d:getlastmodified>',
-            '      </d:prop>',
-            '      <d:status>HTTP/1.1 200 OK</d:status>',
-            '    </d:propstat>',
-            '  </d:response>',
-            '</d:multistatus>'
+            "  <d:response>",
+            f"    <d:href>{href}</d:href>",
+            "    <d:propstat>",
+            "      <d:prop>",
+            f"        <d:displayname>{name}</d:displayname>",
+            f"        <d:getcontentlength>{file_info['size']}</d:getcontentlength>",
+            "        <d:resourcetype/>",
+            f"        <d:getlastmodified>{http_date}</d:getlastmodified>",
+            "      </d:prop>",
+            "      <d:status>HTTP/1.1 200 OK</d:status>",
+            "    </d:propstat>",
+            "  </d:response>",
+            "</d:multistatus>",
         ]
         return "\n".join(lines)
 
