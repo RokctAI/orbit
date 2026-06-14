@@ -1580,9 +1580,13 @@ class TokenStatusWidget:
         if os.path.isfile(cache_file):
             try:
                 with open(cache_file, "r") as f:
-                    file_cache = json.load(f)
+                    content = f.read()
+                file_cache = json.loads(content)
             except Exception:
-                pass
+                try:
+                    os.remove(cache_file)
+                except Exception:
+                    pass
                 
         new_file_cache = {}
         
@@ -2933,13 +2937,21 @@ class TokenStatusWidget:
         if not workspace_dir:
             return
             
-        full_path = os.path.join(workspace_dir, relative_path)
+        clean_path = relative_path.lstrip("/\\")
+        full_path = os.path.abspath(os.path.join(workspace_dir, clean_path))
+        abs_workspace = os.path.abspath(workspace_dir)
+        
+        # Enforce path safety check locally
+        if not full_path.startswith(abs_workspace + os.sep) and full_path != abs_workspace:
+            return
+            
         if not os.path.isfile(full_path):
             return
             
         import subprocess
         try:
-            subprocess.run(["code", "-g", f"{full_path}:{line_number}"], shell=True)
+            # Removed shell=True to eliminate command injection risk
+            subprocess.run(["code", "-g", f"{full_path}:{line_number}"])
         except Exception:
             try:
                 os.startfile(full_path)
