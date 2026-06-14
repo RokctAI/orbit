@@ -38,7 +38,15 @@ IGNORE_DIRS = {
 
 ALLOWED_EXTENSIONS = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".css", 
-    ".json", ".md", ".toml", ".yaml", ".yml", ".txt", ".ini"
+    ".json", ".md", ".toml", ".yaml", ".yml", ".txt", ".ini",
+    # Binary formats
+    ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".docx", ".xlsx", ".pptx", 
+    ".zip", ".tar", ".gz", ".db", ".sqlite", ".bin"
+}
+
+BINARY_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".docx", ".xlsx", ".pptx", 
+    ".zip", ".tar", ".gz", ".db", ".sqlite", ".bin"
 }
 
 class OrbitHTTPRequestHandler(BaseHTTPRequestHandler):
@@ -1640,6 +1648,7 @@ class TokenStatusWidget:
     def _detect_changes(self, workspace_path: str):
         import hashlib
         import difflib
+        import base64
         
         # Ignored directories and extensions
         ignore_dirs = IGNORE_DIRS
@@ -1660,18 +1669,27 @@ class TokenStatusWidget:
                 rel_path = os.path.relpath(file_path, workspace_path).replace("\\", "/")
                 
                 try:
-                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                        content = f.read()
-                    lines = content.splitlines()
+                    is_binary = ext in BINARY_EXTENSIONS
+                    if is_binary:
+                        with open(file_path, "rb") as f:
+                            content_bytes = f.read()
+                        content = base64.b64encode(content_bytes).decode("utf-8")
+                        lines = []
+                    else:
+                        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                            content = f.read()
+                        lines = content.splitlines()
+                        content_bytes = content.encode("utf-8")
                     
                     hasher = hashlib.sha256()
-                    hasher.update(content.encode("utf-8"))
+                    hasher.update(content_bytes)
                     file_hash_val = hasher.hexdigest()
                     
                     current_snapshot[rel_path] = {
                         "hash": file_hash_val,
                         "lines": lines,
-                        "content": content
+                        "content": content,
+                        "is_binary": is_binary
                     }
                 except Exception:
                     pass
@@ -1680,10 +1698,14 @@ class TokenStatusWidget:
         if not baseline:
             init_baseline = {}
             for rel_path, data in current_snapshot.items():
+                is_binary = data.get("is_binary", False)
                 init_baseline[rel_path] = {
                     "hash": data["hash"],
-                    "lines": data["lines"]
+                    "lines": data["lines"],
+                    "is_binary": is_binary
                 }
+                if is_binary:
+                    init_baseline[rel_path]["content"] = data["content"]
             save_baseline_snapshot(init_baseline)
             self.pending_changes = []
             return
@@ -1737,57 +1759,108 @@ class TokenStatusWidget:
                     "content": ""
                 })
 
-        # 4. Modified files -> generates patch
+        # 4. Modified files -> generates patch (text) or binary patch
         for rel_path, curr_data in current_snapshot.items():
             base_data = baseline.get(rel_path)
             if base_data and base_data["hash"] != curr_data["hash"]:
-                base_lines = base_data.get("lines", [])
-                curr_lines = curr_data["lines"]
+                is_binary = curr_data.get("is_binary", False)
                 
-                # Compute additions/deletions counts for UX representation
-                diff_count = list(difflib.ndiff(base_lines, curr_lines))
-                additions = sum(1 for line in diff_count if line.startswith("+ "))
-                deletions = sum(1 for line in diff_count if line.startswith("- "))
-                
-                # Compute the unified diff patch
-                patch_str = ""
-                try:
-                    import sys
-                    # Add Rust library path to sys.path if not there
-                    rust_lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "orbit_diff_rs")
-                    if rust_lib_dir not in sys.path:
-                        sys.path.append(rust_lib_dir)
-                    import orbit_diff_rs
+                if is_binary:
+                    # Binary patch engine
+                    patch_str = ""
+                    use_full_fallback = True
                     
-                    base_content = "\n".join(base_lines)
-                    if base_lines:
-                        base_content += "\n"
-                    patch_str = orbit_diff_rs.compute_diff(
-                        base_content,
-                        curr_data["content"],
-                        f"a/{rel_path}",
-                        f"b/{rel_path}"
-                    )
-                except Exception:
-                    # Fallback to pure Python difflib
-                    base_lines_newline = [l + "\n" for l in base_lines]
-                    curr_lines_newline = [l + "\n" for l in curr_lines]
-                    diff_lines = list(difflib.unified_diff(
-                        base_lines_newline,
-                        curr_lines_newline,
-                        fromfile=f"a/{rel_path}",
-                        tofile=f"b/{rel_path}",
-                        lineterm=""
-                    ))
-                    patch_str = "".join(diff_lines)
-                
-                changes.append({
-                    "path": rel_path,
-                    "type": "patch",
-                    "additions": additions,
-                    "deletions": deletions,
-                    "content": patch_str
-                })
+                    try:
+                        import sys
+                        # Add Rust library path to sys.path if not there
+                        rust_lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "orbit_diff_rs")
+                        if rust_lib_dir not in sys.path:
+                            sys.path.append(rust_lib_dir)
+                        import orbit_diff_rs
+                        
+                        old_bytes = base64.b64decode(base_data.get("content", ""))
+                        new_bytes = base64.b64decode(curr_data["content"])
+                        
+                        patch_bytes = orbit_diff_rs.compute_binary_diff(old_bytes, new_bytes)
+                        
+                        # --- EFFICIENCY ANALYSIS COMMENT ---
+                        # For compressed formats like JPG, PNG, and ZIP, minor visual edits trigger global Huffman
+                        # shifts and block recalculations, making patches large (often > 50-80% of file size).
+                        # For uncompressed formats (BMP, PSD layers) or metadata header edits, delta patches remain
+                        # extremely small. Thus, we use a 50% threshold. If patch size exceeds 50%, we fall back
+                        # to a full upload to save server decompress/patch CPU resources.
+                        if len(patch_bytes) < len(new_bytes) * 0.5:
+                            patch_str = base64.b64encode(patch_bytes).decode("utf-8")
+                            use_full_fallback = False
+                    except Exception:
+                        # Fall back if Rust engine is unavailable
+                        pass
+                        
+                    if use_full_fallback:
+                        changes.append({
+                            "path": rel_path,
+                            "type": "modified",
+                            "additions": 0,
+                            "deletions": 0,
+                            "content": curr_data["content"]
+                        })
+                    else:
+                        changes.append({
+                            "path": rel_path,
+                            "type": "binary_patch",
+                            "additions": 0,
+                            "deletions": 0,
+                            "content": patch_str
+                        })
+                else:
+                    # Text patch engine
+                    base_lines = base_data.get("lines", [])
+                    curr_lines = curr_data["lines"]
+                    
+                    # Compute additions/deletions counts for UX representation
+                    diff_count = list(difflib.ndiff(base_lines, curr_lines))
+                    additions = sum(1 for line in diff_count if line.startswith("+ "))
+                    deletions = sum(1 for line in diff_count if line.startswith("- "))
+                    
+                    # Compute the unified diff patch
+                    patch_str = ""
+                    try:
+                        import sys
+                        # Add Rust library path to sys.path if not there
+                        rust_lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "orbit_diff_rs")
+                        if rust_lib_dir not in sys.path:
+                            sys.path.append(rust_lib_dir)
+                        import orbit_diff_rs
+                        
+                        base_content = "\n".join(base_lines)
+                        if base_lines:
+                            base_content += "\n"
+                        patch_str = orbit_diff_rs.compute_diff(
+                            base_content,
+                            curr_data["content"],
+                            f"a/{rel_path}",
+                            f"b/{rel_path}"
+                        )
+                    except Exception:
+                        # Fallback to pure Python difflib
+                        base_lines_newline = [l + "\n" for l in base_lines]
+                        curr_lines_newline = [l + "\n" for l in curr_lines]
+                        diff_lines = list(difflib.unified_diff(
+                            base_lines_newline,
+                            curr_lines_newline,
+                            fromfile=f"a/{rel_path}",
+                            tofile=f"b/{rel_path}",
+                            lineterm=""
+                        ))
+                        patch_str = "".join(diff_lines)
+                    
+                    changes.append({
+                        "path": rel_path,
+                        "type": "patch",
+                        "additions": additions,
+                        "deletions": deletions,
+                        "content": patch_str
+                    })
 
         self.pending_changes = changes
 
@@ -2076,6 +2149,7 @@ class TokenStatusWidget:
 
     def _reset_baseline(self, workspace_path: str):
         import hashlib
+        import base64
         ignore_dirs = IGNORE_DIRS
         allowed_extensions = ALLOWED_EXTENSIONS
         is_occultation = os.path.basename(workspace_path.rstrip("/\\")).lower() in ("occultation", "occultation_private")
@@ -2090,17 +2164,29 @@ class TokenStatusWidget:
                 rel_path = os.path.relpath(file_path, workspace_path).replace("\\", "/")
                 
                 try:
-                     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                         content = f.read()
-                     lines = content.splitlines()
+                     is_binary = ext in BINARY_EXTENSIONS
+                     if is_binary:
+                         with open(file_path, "rb") as f:
+                             content_bytes = f.read()
+                         content = base64.b64encode(content_bytes).decode("utf-8")
+                         lines = []
+                     else:
+                         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                             content = f.read()
+                         lines = content.splitlines()
+                         content_bytes = content.encode("utf-8")
+                         
                      hasher = hashlib.sha256()
-                     hasher.update(content.encode("utf-8"))
+                     hasher.update(content_bytes)
                      file_hash_val = hasher.hexdigest()
                      
                      new_baseline[rel_path] = {
                          "hash": file_hash_val,
-                         "lines": lines
+                         "lines": lines,
+                         "is_binary": is_binary
                      }
+                     if is_binary:
+                         new_baseline[rel_path]["content"] = content
                 except Exception:
                      pass
         save_baseline_snapshot(new_baseline)

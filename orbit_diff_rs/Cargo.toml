@@ -10,3 +10,4 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.20", features = ["extension-module"] }
 similar = { version = "2.4.0", features = ["inline"] }
+qbsdiff = "0.1.0"
