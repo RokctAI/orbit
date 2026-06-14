@@ -2614,7 +2614,18 @@ class TokenStatusWidget:
             return
             
         # Prompt for custom commit message
-        default_msg = f"Orbit sync update: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+        if len(staged_changes) == 1:
+            change = staged_changes[0]
+            filename = os.path.basename(change["path"])
+            if change["type"] == "added":
+                default_msg = f"Add {filename}"
+            elif change["type"] == "deleted":
+                default_msg = f"Delete {filename}"
+            else:
+                default_msg = f"Update {filename}"
+        else:
+            default_msg = f"Update {len(staged_changes)} files"
+            
         commit_msg = simpledialog.askstring(
             "Commit Message", 
             f"Enter commit message for pushing {len(staged_changes)} files:", 
