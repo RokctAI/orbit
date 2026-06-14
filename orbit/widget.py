@@ -1938,6 +1938,17 @@ class TokenStatusWidget:
         self.changes_canvas.bind("<Enter>", lambda e: self.changes_canvas.bind_all("<MouseWheel>", _on_mousewheel))
         self.changes_canvas.bind("<Leave>", lambda e: self.changes_canvas.unbind_all("<MouseWheel>"))
 
+        btn_bar = tk.Frame(self.changes_frame, bg=self.bg_color)
+        btn_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(4, 8))
+        
+        dry_run_btn = tk.Button(
+            btn_bar, text="Dry-Run Routing Preview",
+            font=("Segoe UI", 7, "bold") if sys.platform == "win32" else ("SF Pro Text", 8, "bold"),
+            fg=self.accent_color, bg=self.hover_color, bd=0, activebackground=self.accent_color, activeforeground=self.bg_color,
+            command=self.orbit_dry_run_preview
+        )
+        dry_run_btn.pack(fill=tk.X, expand=True)
+
     def refresh_changes_list(self):
         # Clear existing items
         for widget in self.changes_list_frame.winfo_children():
@@ -2253,6 +2264,90 @@ class TokenStatusWidget:
                 parent=self.root
             )
         self.root.after(0, show_alert)
+
+    def orbit_dry_run_preview(self):
+        config = load_orbit_config()
+        server = config.get("server")
+        token = config.get("token")
+        workspace_path = config.get("workspace")
+        
+        if not token or not server:
+            messagebox.showerror("Dry-Run Error", "Please login to Gravity first.", parent=self.root)
+            return
+            
+        if not workspace_path or not os.path.isdir(workspace_path):
+            messagebox.showerror("Dry-Run Error", "Please set a valid workspace directory first.", parent=self.root)
+            return
+            
+        if not self.pending_changes:
+            messagebox.showinfo("Dry-Run", "No changes to dry-run.", parent=self.root)
+            return
+            
+        self.set_transacting(True)
+        
+        payload_changes = []
+        for change in self.pending_changes:
+            payload_changes.append({
+                "path": change["path"],
+                "content": change["content"],
+                "type": change["type"]
+            })
+            
+        import urllib.request
+        import urllib.error
+        import uuid
+        
+        push_url = f"{server}/gravity/v1/workspace/push"
+        trace_id = f"trace_{uuid.uuid4().hex}"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "x-trace-id": trace_id
+        }
+        
+        push_payload = json.dumps({
+            "changes": payload_changes,
+            "message": "Dry-run check",
+            "dry_run": True
+        }).encode("utf-8")
+        
+        def do_dry_run_thread():
+            req_obj = urllib.request.Request(push_url, headers=headers, data=push_payload, method="POST")
+            try:
+                with urllib.request.urlopen(req_obj, timeout=10) as response:
+                    res_data = json.loads(response.read().decode())
+                if res_data.get("status"):
+                    self.root.after(0, self.show_dry_run_results, res_data.get("routing_preview", {}))
+                else:
+                    self.root.after(0, self.handle_push_error, res_data.get("message", "Unknown dry-run error"))
+            except urllib.error.HTTPError as e:
+                err_content = e.read().decode()
+                try:
+                    err_json = json.loads(err_content)
+                    msg = err_json.get("detail") or err_content
+                except Exception:
+                    msg = err_content
+                self.root.after(0, self.handle_push_error, f"Dry-run Failed: {msg}")
+            except Exception as ex:
+                self.root.after(0, self.handle_push_error, f"Connection Failed: {str(ex)}")
+            finally:
+                self.root.after(0, lambda: self.set_transacting(False))
+                
+        threading.Thread(target=do_dry_run_thread, daemon=True).start()
+
+    def show_dry_run_results(self, preview):
+        preview_text = "Planned Orbitsplit Routing Routing Preview:\n\n"
+        if not preview:
+            preview_text += "No files processed or matched rules."
+        else:
+            for repo, files in preview.items():
+                preview_text += f"Repository: {repo}\n"
+                for path, route in files.items():
+                    preview_text += f"  • {path} -> {route}\n"
+                preview_text += "\n"
+                
+        messagebox.showinfo("Dry-Run Preview Results", preview_text, parent=self.root)
 
     def toggle_pr_comments_panel(self, event=None):
         self.pr_comments_expanded = not getattr(self, "pr_comments_expanded", False)
