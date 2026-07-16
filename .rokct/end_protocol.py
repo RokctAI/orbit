@@ -11,6 +11,7 @@ PROJECT_ROOT = Path.cwd()
 ROKCT_DIR = PROJECT_ROOT / ".rokct"
 GITHUB_RAW_BASE = "https://raw.githubusercontent.com/RokctAI/The-Rokct-Protocol/main"
 
+
 def dir_hash(d: Path):
     if not d.is_dir():
         return None
@@ -21,10 +22,12 @@ def dir_hash(d: Path):
         h.update(path.read_bytes())
     return h.hexdigest()[:16]
 
+
 def file_hash(path: Path):
     if not path.exists():
         return None
     return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
 
 def load_json_remote(name: str) -> dict:
     url = f"{GITHUB_RAW_BASE}/{name}"
@@ -35,14 +38,17 @@ def load_json_remote(name: str) -> dict:
     except Exception:
         return {}
 
+
 def load_json(name: str) -> dict:
     p = BASE / name
     if p.exists():
         return json.loads(p.read_text(encoding="utf-8"))
     return load_json_remote(name)
 
+
 def touch(path: Path):
     path.write_text("", encoding="utf-8")
+
 
 def main():
     if not ROKCT_DIR.is_dir():
@@ -89,9 +95,11 @@ def main():
             print(f"[end] Kept modified {item_path.name}")
 
     touch(ROKCT_DIR / ".sync_ready")
-    print("[end] Created .sync_ready marker — CI will pick this up when active session ends")
+    print(
+        "[end] Created .sync_ready marker — CI will pick this up when active session ends"
+    )
     print("[end] End protocol cleanup complete.")
+
 
 if __name__ == "__main__":
     main()
-
