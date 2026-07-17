@@ -35,7 +35,9 @@ def cli():
 
 @cli.command()
 @click.option("--server", prompt="Gravity server URL", help="URL of the Gravity server")
-@click.option("--token", prompt="API token", hide_input=True, help="Authentication token")
+@click.option(
+    "--token", prompt="API token", hide_input=True, help="Authentication token"
+)
 def login(server, token):
     """Authenticate with a Gravity server."""
     # Phase 2: validate token against server
@@ -68,47 +70,51 @@ def mount():
             start_vfs_server(host="127.0.0.1", port=8080)
         except Exception as e:
             import sys
+
             sys.stderr.write(f"VFS Server error: {e}\n")
 
-    server_thread = threading.Thread(
-        target=run_vfs_safely, 
-        daemon=True
-    )
+    server_thread = threading.Thread(target=run_vfs_safely, daemon=True)
     server_thread.start()
-    
+
     # Wait for the local server to spin up
     time.sleep(1.5)
-    
+
     click.echo("🛸 Mounting Gravity workspace via WebDAV on localhost:8080...")
-    
+
     # Run net use command to assign next available drive letter
     result = subprocess.run(
-        ["net", "use", "*", "http://127.0.0.1:8080/", "/persistent:no"], 
-        capture_output=True, 
-        text=True
+        ["net", "use", "*", "http://127.0.0.1:8080/", "/persistent:no"],
+        capture_output=True,
+        text=True,
     )
-    
+
     if result.returncode != 0:
-        click.echo(f"❌ Failed to mount drive: {result.stderr.strip() or result.stdout.strip()}")
+        click.echo(
+            f"❌ Failed to mount drive: {result.stderr.strip() or result.stdout.strip()}"
+        )
         click.echo("   Ensure the Windows 'WebClient' service is running.")
-        click.echo("   To start it, open cmd/PowerShell as Administrator and run: net start WebClient")
+        click.echo(
+            "   To start it, open cmd/PowerShell as Administrator and run: net start WebClient"
+        )
         return
-        
+
     output = result.stdout
-    drive_match = re.search(r'([A-Z]:)', output)
+    drive_match = re.search(r"([A-Z]:)", output)
     drive_letter = drive_match.group(1) if drive_match else "Virtual Drive"
-    
+
     click.echo(f"🎉 Success! Gravity virtual workspace is mounted at {drive_letter}")
     click.echo("   You can now open it in VS Code, Cursor, or File Explorer!")
     click.echo("   Press Ctrl+C to unmount and exit.")
-    
+
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         click.echo(f"\n🛸 Unmounting drive {drive_letter}...")
         if drive_letter != "Virtual Drive":
-            subprocess.run(["net", "use", drive_letter, "/delete", "/y"], capture_output=True)
+            subprocess.run(
+                ["net", "use", drive_letter, "/delete", "/y"], capture_output=True
+            )
         click.echo("👋 Exited.")
 
 
@@ -120,7 +126,9 @@ def status():
     click.echo("\n🛸 Orbit Status")
     if config.get("server"):
         click.echo(f"   Server: {config['server']}")
-        click.echo(f"   Auth: {'✅ configured' if config.get('token') else '❌ no token'}")
+        click.echo(
+            f"   Auth: {'✅ configured' if config.get('token') else '❌ no token'}"
+        )
     else:
         click.echo("   Not connected. Run 'orbit login' first.")
 
@@ -132,10 +140,9 @@ def widget():
     """Launch the floating minimal status bar widget."""
     click.echo("Launching Orbit Status Bar Widget...")
     from orbit.widget import run_widget
-    run_widget()
 
+    run_widget()
 
 
 if __name__ == "__main__":
     cli()
-
