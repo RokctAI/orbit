@@ -4,6 +4,7 @@
 import os
 import sys
 import json
+import secrets
 import socket
 import threading
 import time
@@ -28,6 +29,42 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 THEME_FILE = os.path.join(CONFIG_DIR, "widget_theme.json")
 
 ACTIVE_WIDGET_INSTANCE = None
+
+# Local HTTP server auth: a fresh random token is generated every time the
+# widget process starts and is never persisted to disk in plaintext config.
+# It is written to a token file (0600-ish, best effort) inside CONFIG_DIR so
+# that a legitimate local caller (e.g. a companion browser extension or CLI
+# helper running as the same OS user) can read it and present it back on
+# every request. Any caller that cannot read files in CONFIG_DIR (e.g. an
+# arbitrary web page) cannot learn the token and therefore cannot call the
+# API.
+HTTP_SERVER_TOKEN = secrets.token_urlsafe(32)
+HTTP_TOKEN_FILE = os.path.join(CONFIG_DIR, "widget_http_token")
+
+# Restrict CORS to a fixed, non-wildcard origin. There is no companion
+# browser extension shipped in this repo, so we cannot discover a specific
+# chrome-extension:// id to allow-list; rather than reflect '*' (which lets
+# any web page in the user's browser talk to this localhost server), we omit
+# the Access-Control-Allow-Origin header entirely for the sensitive
+# /api/report endpoint. Browsers block cross-origin reads/writes without
+# that header, which blocks arbitrary web pages while still allowing
+# same-origin/local tooling (curl, python, extensions using host permissions
+# rather than fetch-from-page-context) to call the endpoint with the token.
+ALLOWED_REPORT_ORIGIN = None
+
+
+def _write_http_token_file():
+    """Persist the current run's HTTP token so a legitimate local caller can read it."""
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(HTTP_TOKEN_FILE, "w", encoding="utf-8") as f:
+            f.write(HTTP_SERVER_TOKEN)
+        try:
+            os.chmod(HTTP_TOKEN_FILE, 0o600)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 IGNORE_DIRS = {
     ".git", ".rokct", ".venv", "venv", "env", "__pycache__", 
@@ -55,18 +92,29 @@ class OrbitHTTPRequestHandler(BaseHTTPRequestHandler):
         # Suppress logging request info to console to keep it clean
         pass
 
+    def _check_auth(self) -> bool:
+        """Validate the shared-secret token on sensitive requests."""
+        header_token = self.headers.get('X-Orbit-Token', '')
+        if not header_token:
+            auth = self.headers.get('Authorization', '')
+            if auth.startswith('Bearer '):
+                header_token = auth[len('Bearer '):]
+        return bool(header_token) and secrets.compare_digest(header_token, HTTP_SERVER_TOKEN)
+
     def do_OPTIONS(self):
         self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
+        if ALLOWED_REPORT_ORIGIN:
+            self.send_header('Access-Control-Allow-Origin', ALLOWED_REPORT_ORIGIN)
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Orbit-Token, Authorization')
         self.end_headers()
 
     def do_GET(self):
         if self.path == '/api/ping':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            if ALLOWED_REPORT_ORIGIN:
+                self.send_header('Access-Control-Allow-Origin', ALLOWED_REPORT_ORIGIN)
             self.end_headers()
             self.wfile.write(json.dumps({"status": "ok", "app": "orbit"}).encode('utf-8'))
         else:
@@ -75,6 +123,13 @@ class OrbitHTTPRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == '/api/report':
+            if not self._check_auth():
+                self.send_response(401)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "unauthorized"}).encode('utf-8'))
+                return
+
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
             try:
@@ -82,15 +137,17 @@ class OrbitHTTPRequestHandler(BaseHTTPRequestHandler):
                 global ACTIVE_WIDGET_INSTANCE
                 if ACTIVE_WIDGET_INSTANCE:
                     ACTIVE_WIDGET_INSTANCE.handle_chrome_data(data)
-                
+
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
+                if ALLOWED_REPORT_ORIGIN:
+                    self.send_header('Access-Control-Allow-Origin', ALLOWED_REPORT_ORIGIN)
                 self.end_headers()
                 self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
             except Exception as e:
                 self.send_response(400)
-                self.send_header('Access-Control-Allow-Origin', '*')
+                if ALLOWED_REPORT_ORIGIN:
+                    self.send_header('Access-Control-Allow-Origin', ALLOWED_REPORT_ORIGIN)
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
         else:
@@ -1904,6 +1961,8 @@ class TokenStatusWidget:
         self.pending_changes = changes
 
     def start_http_server(self):
+        _write_http_token_file()
+
         def run_server():
             server_address = ('127.0.0.1', 49998)
             class ReuseHTTPServer(HTTPServer):

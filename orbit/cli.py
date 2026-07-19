@@ -4,26 +4,18 @@
 """Orbit CLI — OSS client daemon for Gravity."""
 
 import os
-import json
 
 import click
 
-
-CONFIG_DIR = os.path.abspath(os.path.expanduser("~/.orbit"))
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
-
-
-def _load_orbit_config() -> dict:
-    if os.path.isfile(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-
-def _save_orbit_config(data: dict):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+# Reuse the keyring-backed config load/save from widget.py instead of a
+# second, insecure plaintext-JSON implementation. widget.py's
+# load_orbit_config/save_orbit_config store the "token" field via the
+# `keyring` package (already a declared dependency), falling back to
+# plaintext only if keyring itself is unavailable.
+from orbit.widget import (
+    load_orbit_config as _load_orbit_config,
+    save_orbit_config as _save_orbit_config,
+)
 
 
 @click.group()
