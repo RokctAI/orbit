@@ -3,6 +3,7 @@
 
 import os
 import json
+import base64
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -11,8 +12,26 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 import email.utils
 
+try:
+    from .widget import BINARY_EXTENSIONS
+except ImportError:
+    try:
+        from widget import BINARY_EXTENSIONS
+    except ImportError:
+        # Fallback list kept consistent with widget.py's BINARY_EXTENSIONS
+        BINARY_EXTENSIONS = {
+            ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".docx", ".xlsx", ".pptx",
+            ".zip", ".tar", ".gz", ".db", ".sqlite", ".bin"
+        }
+
 # Global cache for tracking raw file content on-read to compute delta patches on-write
+# Cache entries are always `bytes` for binary files and `str` for text files.
 VFS_FILE_CACHE = {}
+
+
+def _is_binary_path(file_path):
+    ext = os.path.splitext(file_path)[1].lower()
+    return ext in BINARY_EXTENSIONS
 
 class OrbitWebDAVHandler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
@@ -158,9 +177,16 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
             return
 
         raw_content = res.get("content", "")
-        VFS_FILE_CACHE[path] = raw_content
-        content = raw_content.encode("utf-8")
-        
+        if res.get("is_binary") or _is_binary_path(file_path):
+            try:
+                content = base64.b64decode(raw_content)
+            except Exception:
+                content = raw_content.encode("utf-8", errors="ignore")
+            VFS_FILE_CACHE[path] = content
+        else:
+            VFS_FILE_CACHE[path] = raw_content
+            content = raw_content.encode("utf-8")
+
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(content)))
@@ -178,37 +204,54 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         file_path = "/".join(parts[1:])
 
         content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length).decode('utf-8', errors='ignore')
+        raw_body = self.rfile.read(content_length)
 
         is_special_file = file_path.endswith("hooks.py") or file_path.endswith("modules.txt")
+        is_binary = _is_binary_path(file_path)
         original_content = VFS_FILE_CACHE.get(path)
 
-        if not is_special_file and original_content is not None:
-            import difflib
-            diff_list = list(difflib.unified_diff(
-                original_content.splitlines(keepends=True),
-                body.splitlines(keepends=True),
-                fromfile=file_path,
-                tofile=file_path,
-                lineterm=""
-            ))
-            if not diff_list:
+        if is_binary:
+            # Binary content must never go through a lossy UTF-8 decode. Keep the
+            # raw bytes as-is and diff/store them as bytes, matching how do_GET
+            # caches binary content (see _is_binary_path usage above).
+            body = raw_body
+            if not is_special_file and isinstance(original_content, (bytes, bytearray)) and original_content == body:
                 self.send_response(204)
                 self.end_headers()
                 return
-            
-            diff_text = "\n".join(diff_list) + "\n"
-            content_to_send = diff_text
-            change_type = "patch"
-        else:
-            content_to_send = body
+
+            content_to_send = base64.b64encode(body).decode("ascii")
             change_type = "modified"
+        else:
+            body = raw_body.decode('utf-8', errors='ignore')
+
+            if not is_special_file and isinstance(original_content, str):
+                import difflib
+                diff_list = list(difflib.unified_diff(
+                    original_content.splitlines(keepends=True),
+                    body.splitlines(keepends=True),
+                    fromfile=file_path,
+                    tofile=file_path,
+                    lineterm=""
+                ))
+                if not diff_list:
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+
+                diff_text = "\n".join(diff_list) + "\n"
+                content_to_send = diff_text
+                change_type = "patch"
+            else:
+                content_to_send = body
+                change_type = "modified"
 
         data = {
             "repo_name": repo_name,
             "path": file_path,
             "content": content_to_send,
-            "type": change_type
+            "type": change_type,
+            "is_binary": is_binary
         }
         res, err = self._api_request("POST", "/v1/workspace/file", data=data)
         if err:
