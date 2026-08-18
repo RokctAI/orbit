@@ -179,7 +179,10 @@ def main():
     if email:
         prefix = email.split("@")[0].replace(".", "").lower()
         domain = email.split("@")[1].lower()
-        domain_hash = hashlib.md5(domain.encode()).hexdigest()[:6]
+        # Non-security use: short fingerprint of the email domain to build a
+        # human-readable safe identity. usedforsecurity=False documents intent
+        # and clears bandit B324 (CWE-327) without changing the digest output.
+        domain_hash = hashlib.md5(domain.encode(), usedforsecurity=False).hexdigest()[:6]
         safe_id = f"{prefix}.{domain_hash}"
         mem = os.path.join(ROKCT_DIR, "memory.md")
         with open(mem, "a", encoding="utf-8") as f:
