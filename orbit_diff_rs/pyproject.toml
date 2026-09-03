@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "orbit_diff_rs"
+description = "Native text/binary diff helpers for Orbit and Gravity (pyo3)"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "RokctAI", email = "admin@rokct.ai"}]
+# Version comes from Cargo.toml.
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+module-name = "orbit_diff_rs"
+features = ["pyo3/extension-module"]
