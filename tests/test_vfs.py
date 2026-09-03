@@ -48,6 +48,9 @@ class FakeGravity:
         # ``(http_status, json_body)`` to answer the write with an HTTP error
         # instead (the current Gravity raises 409 on a patch conflict).
         self.write_error = None
+        # Same for GET /v1/workspace/file and for the per-repo listing.
+        self.read_error = None
+        self.list_error = None
         # Keys served in the pre-"encoding" shape ({"content", "is_binary"}).
         self.legacy_keys = set()
 
@@ -71,6 +74,9 @@ class FakeGravity:
                 if self.repos is None:
                     return self._error(req.full_url, 422, "Field required: repo_name")
                 return self._json({"repos": self.repos})
+            if self.list_error is not None:
+                code, payload = self.list_error
+                return self._error_body(req.full_url, code, payload)
             return self._json({"files": self.files})
 
         if parsed.path.endswith("/v1/workspace/file"):
@@ -79,6 +85,9 @@ class FakeGravity:
                     code, payload = self.write_error
                     return self._error_body(req.full_url, code, payload)
                 return self._json(self.write_response)
+            if self.read_error is not None:
+                code, payload = self.read_error
+                return self._error_body(req.full_url, code, payload)
             key = (query.get("repo_name"), query.get("path"))
             if key not in self.contents:
                 return self._error(req.full_url, 404, "File not found")
@@ -437,6 +446,93 @@ def test_get_decodes_percent_encoded_paths(logged_in, gravity, dav):
 def test_get_missing_file_is_404_and_root_get_is_forbidden(logged_in, gravity, dav):
     assert dav("GET", "/control/nope.txt")[0] == 404
     assert dav("GET", "/control")[0] == 403
+
+
+MERGED_VIEW_ERROR = (
+    "Cannot build the merged view of app/hooks.py: private blueprint "
+    ".rokct/app_blueprints.json is not valid JSON: Expecting value: line 1"
+)
+
+
+def test_get_passes_a_gravity_500_through_with_its_message(logged_in, gravity, dav):
+    """A damaged blueprint is a server error, not a missing file: an editor
+    told 404 may offer to create the file."""
+    gravity.read_error = (500, {"detail": MERGED_VIEW_ERROR})
+    status, body = dav("GET", "/control/app/hooks.py")
+    assert status == 500
+    assert MERGED_VIEW_ERROR.encode("utf-8") in body
+    assert b"File not found" not in body and b"not found" not in body.lower()
+    assert "control/app/hooks.py" not in vfs.VFS_FILE_CACHE
+
+
+def test_get_genuine_404_stays_404(logged_in, gravity, dav):
+    status, body = dav("GET", "/control/nope.txt")
+    assert status == 404
+    assert b"File not found: File not found" in body
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_get_keeps_auth_errors_as_they_are(logged_in, gravity, dav, code):
+    gravity.read_error = (code, {"detail": "Invalid token"})
+    status, body = dav("GET", "/control/src/app.py")
+    assert status == code
+    assert b"Invalid token" in body
+    assert b"File not found" not in body
+
+
+def test_get_with_gravity_unreachable_is_not_file_not_found(logged_in, dav):
+    # conftest blocks the network entirely: the request never reaches Gravity.
+    status, body = dav("GET", "/control/src/app.py")
+    assert status == 503
+    assert b"File not found" not in body
+    assert b"Gravity unavailable" in body
+
+
+def test_get_when_not_logged_in_is_not_file_not_found(gravity, dav):
+    status, body = dav("GET", "/control/src/app.py")
+    assert status == 503
+    assert b"Not logged in" in body
+    assert b"File not found" not in body
+    assert gravity.requests == []
+
+
+def test_propfind_single_file_passes_gravity_errors_through(logged_in, gravity, dav):
+    gravity.list_error = (500, {"detail": MERGED_VIEW_ERROR})
+    status, body = dav("PROPFIND", "/control/src/app.py", headers={"Depth": "0"})
+    assert status == 500
+    assert MERGED_VIEW_ERROR.encode("utf-8") in body
+
+    gravity.list_error = (401, {"detail": "Invalid token"})
+    status, _ = dav("PROPFIND", "/control/src/app.py", headers={"Depth": "0"})
+    assert status == 401
+
+    gravity.list_error = (404, {"detail": "Repository control not found"})
+    status, body = dav("PROPFIND", "/control/src/app.py", headers={"Depth": "0"})
+    assert status == 404
+    assert b"Repository control not found" in body
+
+    gravity.list_error = None
+    status, _ = dav("PROPFIND", "/control/src/missing.py", headers={"Depth": "0"})
+    assert status == 404, "a path absent from a good listing is still 404"
+
+
+def test_propfind_single_file_with_gravity_unreachable_is_503(logged_in, dav):
+    status, body = dav("PROPFIND", "/control/src/app.py", headers={"Depth": "0"})
+    assert status == 503
+    assert b"Not found" not in body
+
+
+def test_read_failure_from_error_mapping():
+    assert vfs._read_failure_from_error(
+        vfs.GravityError("File not found", status=404)
+    ) == (
+        404,
+        "File not found: File not found",
+    )
+    assert vfs._read_failure_from_error(vfs.GravityError("boom", status=500))[0] == 500
+    assert vfs._read_failure_from_error(vfs.GravityError("no", status=403))[0] == 403
+    assert vfs._read_failure_from_error(vfs.GravityError("Not logged in"))[0] == 503
+    assert vfs._read_failure_from_error("plain string error")[0] == 503
 
 
 def _git(*args, cwd):

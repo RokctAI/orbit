@@ -464,6 +464,25 @@ def _write_failure_from_error(err):
     return 500, str(err)
 
 
+def _read_failure_from_error(err, missing_message="File not found"):
+    """Map a failed read (``GET /v1/workspace/file`` or the listing behind a
+    single-file PROPFIND) to ``(http_status, message)`` for the editor.
+
+    Only a genuine 404 from Gravity is reported as missing. Any other status
+    propagates as-is (a 500 such as "Cannot build the merged view ... is not
+    valid JSON" stays a 500; 401/403 stay what they are): an editor told a
+    file does not exist may offer to create it, which is the wrong response
+    to a damaged file. An error with no HTTP status (not logged in, network
+    down) is 503: Gravity could not be asked, not "the file is not there".
+    """
+    status = getattr(err, "status", None)
+    if status == 404:
+        return 404, f"{missing_message}: {err}"
+    if status is not None:
+        return status, f"Gravity error: {err}"
+    return 503, f"Gravity unavailable: {err}"
+
+
 def _is_binary_path(file_path):
     ext = os.path.splitext(file_path)[1].lower()
     return ext in BINARY_EXTENSIONS
@@ -617,7 +636,8 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
             "GET", "/v1/workspace/list", {"repo_name": repo_name}
         )
         if err:
-            self.send_error(404, "Not found")
+            status, message = _read_failure_from_error(err, "Not found")
+            self.send_error(status, message)
             return None
 
         files = res.get("files", [])
@@ -658,7 +678,9 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
             "GET", "/v1/workspace/file", {"repo_name": repo_name, "path": file_path}
         )
         if err:
-            self.send_error(404, f"File not found: {err}")
+            # A 404 from Gravity is the only "file not found"; see helper.
+            status, message = _read_failure_from_error(err)
+            self.send_error(status, message)
             return
 
         cached = self._decode_file_response(res, file_path)
