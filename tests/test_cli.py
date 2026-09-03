@@ -113,6 +113,73 @@ def test_status_reports_the_token_source_the_vfs_will_use(
     assert "ORBIT_TOKEN environment variable" in _run_cli(["status"]).output
 
 
+# ---------------------------------------------------------------------------
+# status / mount: where the repository list comes from
+# ---------------------------------------------------------------------------
+
+
+def _fake_gravity(monkeypatch, repos=None):
+    """Route the CLI's Gravity calls to test_vfs.FakeGravity (no real network)."""
+    import urllib.request
+
+    from tests.test_vfs import FakeGravity
+
+    fake = FakeGravity(repos=repos)
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    return fake
+
+
+def test_status_warns_when_server_cannot_list_repos_and_no_override(
+    isolated_config, fake_keyring, monkeypatch
+):
+    import orbit.vfs as vfs
+
+    cfg.save_orbit_config({"server": "https://platform.rokct.ai", "token": "tok"})
+    fake = _fake_gravity(monkeypatch)  # today's server: 422 without repo_name
+
+    result = _run_cli(["status"])
+    assert result.exit_code == 0, result.output
+    assert "no repository list available" in result.output
+    assert "no repository-enumeration route" in result.output
+    assert "NOT verified" in result.output
+    assert '"repos"' in result.output and "config.json" in result.output
+    assert vfs.REPO_LIST_NOTICE_NAME in result.output
+    for name in vfs.DEFAULT_REPOS:
+        assert name in result.output
+    assert fake.requests[-1]["path"].endswith("/v1/workspace/list")
+
+
+def test_status_reports_repos_from_config_override_without_network(
+    isolated_config, fake_keyring
+):
+    cfg.save_orbit_config(
+        {"server": "https://platform.rokct.ai", "token": "tok", "repos": ["rcore"]}
+    )
+    result = _run_cli(["status"])
+    assert result.exit_code == 0, result.output
+    assert "Repos: 1 from 'repos' in ~/.orbit/config.json (rcore)" in result.output
+    assert "fallback" not in result.output
+
+
+def test_status_reports_repos_listed_by_the_server(
+    isolated_config, fake_keyring, monkeypatch
+):
+    cfg.save_orbit_config({"server": "https://platform.rokct.ai", "token": "tok"})
+    _fake_gravity(monkeypatch, repos=["rcore", {"path": "control"}])
+    result = _run_cli(["status"])
+    assert "Repos: 2 listed by the Gravity server (rcore, control)" in result.output
+    assert "fallback" not in result.output
+
+
+def test_status_reports_unreachable_server_plainly(isolated_config, fake_keyring):
+    # conftest blocks urlopen entirely: the server cannot be reached.
+    cfg.save_orbit_config({"server": "https://platform.rokct.ai", "token": "tok"})
+    result = _run_cli(["status"])
+    assert result.exit_code == 0, result.output
+    assert "could not reach Gravity" in result.output
+    assert "NOT verified" in result.output
+
+
 def test_widget_without_display_prints_friendly_message(monkeypatch):
     import types
 
@@ -231,6 +298,16 @@ def test_mount_macos_uses_mount_webdav(mount_env, monkeypatch, tmp_path):
     assert cmd[-1] == os.path.join(str(tmp_path), "Gravity")
     assert ("vfs", 9090) in mount_env
     assert "mounted at" in result.output
+
+
+def test_mount_warns_about_the_unverified_fallback_repo_list(mount_env, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    _fake_gravity(monkeypatch)
+    result = _run_cli(["mount"])
+    assert result.exit_code == 0, result.output
+    assert "no repository list available" in result.output
+    assert "config.json" in result.output
 
 
 def test_mount_linux_without_gio_prints_exact_commands(mount_env, monkeypatch):

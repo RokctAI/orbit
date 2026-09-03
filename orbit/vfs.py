@@ -30,7 +30,6 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import xml.etree.ElementTree as ET
 from datetime import datetime
 import email.utils
 import time
@@ -95,10 +94,26 @@ DEFAULT_REPOS = [
     "The-Open-Language-Project",
 ]
 
+# Where the drive-root repository list came from (see resolve_repo_list).
+REPO_SOURCE_CONFIG = "config"  # "repos" in ~/.orbit/config.json
+REPO_SOURCE_SERVER = "server"  # GET /v1/workspace/list without repo_name
+REPO_SOURCE_FALLBACK = "fallback"  # DEFAULT_REPOS, unverified
+
+# When the list is the DEFAULT_REPOS fallback the drive root also carries this
+# read-only file, so an unverified (possibly phantom) repository is never
+# presented as real without the explanation sitting right next to it.
+REPO_LIST_NOTICE_NAME = "00-ORBIT-REPO-LIST-UNAVAILABLE.txt"
+_REPO_LIST_NOTICE_MTIME = time.time()
+
 # The server-provided repository list is cached briefly because WebDAV
 # clients issue a root PROPFIND on nearly every interaction.
 REPO_LIST_TTL_SECONDS = 60
-_REPO_LIST_CACHE: Dict[str, Any] = {"expires": 0.0, "repos": None}
+_REPO_LIST_CACHE: Dict[str, Any] = {
+    "expires": 0.0,
+    "repos": None,
+    "source": None,
+    "detail": "",
+}
 
 
 def _repo_names_from_payload(payload: Any) -> List[str]:
@@ -134,6 +149,168 @@ def _repo_names_from_payload(payload: Any) -> List[str]:
 def _reset_repo_list_cache():
     _REPO_LIST_CACHE["expires"] = 0.0
     _REPO_LIST_CACHE["repos"] = None
+    _REPO_LIST_CACHE["source"] = None
+    _REPO_LIST_CACHE["detail"] = ""
+
+
+def _fallback_detail(err) -> str:
+    """Plain-language reason why the server did not supply a repository list."""
+    status = getattr(err, "status", None)
+    if status == 422:
+        return (
+            "this Gravity server has no repository-enumeration route "
+            "(GET /v1/workspace/list requires repo_name)"
+        )
+    if status == 401:
+        return f"Gravity rejected the session token ({err})"
+    if status is not None:
+        return f"Gravity answered HTTP {status} ({err})"
+    return f"could not reach Gravity ({err})"
+
+
+def resolve_repo_list(config, request=None):
+    """Work out the repositories to show at the drive root.
+
+    Returns ``(names, source, detail)`` where ``source`` is one of
+    :data:`REPO_SOURCE_CONFIG`, :data:`REPO_SOURCE_SERVER` or
+    :data:`REPO_SOURCE_FALLBACK`. ``detail`` is a human-readable reason
+    (only meaningful for the fallback), so ``orbit status`` and the VFS root
+    can tell the user exactly why the list is not authoritative.
+
+    Order: ``repos`` in ~/.orbit/config.json (explicit user override), then
+    the Gravity server (consumed when the server provides a ``repos`` list),
+    then :data:`DEFAULT_REPOS`. ``request`` is ``(method, endpoint) ->
+    (payload, err)`` and defaults to :func:`gravity_api_request` with
+    ``config``.
+    """
+    configured = _repo_names_from_payload({"repos": config.get("repos")})
+    if configured:
+        return configured, REPO_SOURCE_CONFIG, ""
+
+    if request is None:
+
+        def request(method, endpoint):
+            return gravity_api_request(method, endpoint, config=config)
+
+    res, err = request("GET", "/v1/workspace/list")
+    if err:
+        return list(DEFAULT_REPOS), REPO_SOURCE_FALLBACK, _fallback_detail(err)
+
+    names = _repo_names_from_payload(res)
+    if names:
+        return names, REPO_SOURCE_SERVER, ""
+    return (
+        list(DEFAULT_REPOS),
+        REPO_SOURCE_FALLBACK,
+        "the Gravity server answered without a repository list",
+    )
+
+
+def repo_list_notice_text(detail: str) -> str:
+    """Body of the notice file served at the drive root in fallback mode."""
+    repos = "\n".join(f"    {name}" for name in DEFAULT_REPOS)
+    return (
+        "Orbit could not get the list of repositories from Gravity.\n"
+        "\n"
+        f"Reason: {detail or 'unknown'}\n"
+        "\n"
+        "The folders next to this file are Orbit's built-in fallback list\n"
+        "(DEFAULT_REPOS in orbit/vfs.py). It has NOT been verified against the\n"
+        "server: some of these repositories may no longer exist there, and\n"
+        "opening one of those fails with a Gravity error.\n"
+        "\n"
+        f"{repos}\n"
+        "\n"
+        "To fix this, tell Orbit which repositories you have by adding a\n"
+        '"repos" list to ~/.orbit/config.json, for example:\n'
+        "\n"
+        '    {"server": "https://platform.rokct.ai", "repos": ["rcore", "control"]}\n'
+        "\n"
+        "then run `orbit mount` again. `orbit status` shows which list is in use.\n"
+    )
+
+
+class GravityError(str):
+    """A failed Gravity API call.
+
+    Behaves as the error message (so ``if err:`` and f-strings keep working)
+    and additionally carries the HTTP ``status`` and the decoded JSON
+    ``body`` when the failure was an HTTP error response, so callers can map
+    e.g. a 409 conflict to a 409 for the editor instead of a generic 500.
+    """
+
+    status: Optional[int]
+    body: Any
+
+    def __new__(cls, message, status=None, body=None):
+        text = str(message or "")
+        if not text:
+            text = f"HTTP {status}" if status else "Unknown Gravity error"
+        obj = super().__new__(cls, text)
+        obj.status = status
+        obj.body = body
+        return obj
+
+
+def _error_from_http(e: urllib.error.HTTPError) -> GravityError:
+    body: Any = None
+    try:
+        raw = e.read().decode("utf-8")
+        body = json.loads(raw) if raw.strip() else None
+    except Exception:
+        body = None
+
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, str) and detail:
+        message = detail
+    elif isinstance(detail, dict) and detail.get("message"):
+        message = str(detail["message"])
+    elif isinstance(body, dict) and body.get("message"):
+        message = str(body["message"])
+    else:
+        message = str(e)
+    return GravityError(message, status=e.code, body=body)
+
+
+def gravity_api_request(
+    method, endpoint, params=None, data=None, config=None, timeout=30
+):
+    """Call the Gravity API. Returns ``(payload, None)`` or ``(None, GravityError)``.
+
+    The base URL is ``{server}/gravity`` by default (production nginx
+    prefix); see :func:`orbit.config.resolve_gravity_base_url` for overrides.
+    """
+    import uuid
+
+    if config is None:
+        config = load_orbit_config()
+    url = gravity_api_url(endpoint, config)
+    token = config.get("token", "")
+    if not url:
+        return None, GravityError("Not logged in")
+
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+
+    trace_id = f"trace_{uuid.uuid4().hex}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "x-trace-id": trace_id,
+    }
+
+    req_data = None
+    if data:
+        req_data = json.dumps(data).encode("utf-8")
+
+    req = urllib.request.Request(url, headers=headers, method=method, data=req_data)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8")), None
+    except urllib.error.HTTPError as e:
+        return None, _error_from_http(e)
+    except Exception as e:
+        return None, GravityError(str(e) or type(e).__name__)
 
 
 def _git_blob_sha(content: bytes) -> str:
@@ -214,12 +391,38 @@ def _direct_children(files, dir_path):
     return subdirs, children
 
 
-def _write_failure_from_response(res):
+def _result_reports_no_changes(outcome) -> bool:
+    """Whether a per-repo ``results`` value says nothing was committed.
+
+    Gravity reports ``"No changes to push"`` (or, for paired public/private
+    repositories, ``"Public: No Changes, Private: No Changes"``) when its
+    commit step found nothing to commit. A value that mentions a push
+    (``"Pushed successfully"``, ``"Public: Pushed, Private: No Changes"``)
+    means at least one side landed.
+    """
+    text = str(outcome or "").lower()
+    return "no changes" in text and "pushed" not in text
+
+
+def _response_reports_no_changes(res) -> bool:
+    if not isinstance(res, dict) or not isinstance(res.get("results"), dict):
+        return False
+    return any(_result_reports_no_changes(v) for v in res["results"].values())
+
+
+def _write_failure_from_response(res, content_changed=True):
     """Map a Gravity write response body to ``(http_status, message)`` or None.
 
     Gravity answers a failed patch with HTTP 200 and a body such as
     ``{"status": false, "conflict": true, "conflicts": [...], "message": ...}``
     so a 2xx transport status alone does not mean the save landed.
+
+    ``content_changed`` says whether the client *knows* it sent content that
+    differs from what the server has (a non-empty patch, or binary bytes that
+    differ from the cached copy). In that case a ``"No changes to push"``
+    result is a contradiction: the server dropped the change (seen with a
+    Gravity older than this client), and reporting success would make the
+    editor believe a save that never landed.
     """
     if not isinstance(res, dict):
         return 500, "Unexpected response from Gravity"
@@ -229,7 +432,36 @@ def _write_failure_from_response(res):
         return 409, f"{detail} ({conflicts})" if conflicts else detail
     if not res.get("status", True):
         return 500, str(res.get("message") or "Gravity rejected the change")
+    if content_changed and isinstance(res.get("results"), dict):
+        for repo, outcome in res["results"].items():
+            if _result_reports_no_changes(outcome):
+                return 500, (
+                    f"Gravity answered '{outcome}' for {repo} although modified "
+                    "content was sent, so the change was NOT persisted. The "
+                    "Gravity server is probably older than this client; the "
+                    "file on the server is unchanged."
+                )
     return None
+
+
+def _write_failure_from_error(err):
+    """Map a failed ``POST /v1/workspace/file`` to ``(http_status, message)``.
+
+    A 409 from Gravity (``detail: {"message", "conflicts"}``) stays a 409 for
+    the editor; every other failure is a 500.
+    """
+    status = getattr(err, "status", None)
+    body = getattr(err, "body", None)
+    if status == 409:
+        payload = body
+        if isinstance(body, dict) and isinstance(body.get("detail"), dict):
+            payload = body["detail"]
+        if isinstance(payload, dict):
+            conflicts = ", ".join(str(c) for c in payload.get("conflicts") or [])
+            detail = payload.get("message") or str(err) or "Merge conflict"
+            return 409, f"{detail} ({conflicts})" if conflicts else detail
+        return 409, str(err) or "Merge conflict"
+    return 500, str(err)
 
 
 def _is_binary_path(file_path):
@@ -250,6 +482,35 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         # plaintext file, so the VFS is authenticated after a normal login.
         return load_orbit_config()
 
+    def _list_repos_with_source(self):
+        """``(names, source, detail)`` for the drive root (see resolve_repo_list).
+
+        The config override is never cached (it is a local file read); the
+        server answer, including a fallback decision, is cached for
+        REPO_LIST_TTL_SECONDS.
+        """
+        config = self._get_config()
+        configured = _repo_names_from_payload({"repos": config.get("repos")})
+        if configured:
+            return configured, REPO_SOURCE_CONFIG, ""
+
+        now = time.monotonic()
+        cached: Optional[List[str]] = _REPO_LIST_CACHE.get("repos")
+        if cached is not None and now < float(_REPO_LIST_CACHE.get("expires") or 0):
+            return (
+                list(cached),
+                _REPO_LIST_CACHE.get("source") or REPO_SOURCE_FALLBACK,
+                str(_REPO_LIST_CACHE.get("detail") or ""),
+            )
+
+        names, source, detail = resolve_repo_list(config, self._api_request)
+
+        _REPO_LIST_CACHE["repos"] = list(names)
+        _REPO_LIST_CACHE["source"] = source
+        _REPO_LIST_CACHE["detail"] = detail
+        _REPO_LIST_CACHE["expires"] = now + REPO_LIST_TTL_SECONDS
+        return names, source, detail
+
     def _list_repos(self):
         """Repository names for the drive root.
 
@@ -258,62 +519,31 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         ``repo_name``; consumed when the server provides a ``repos`` list),
         then DEFAULT_REPOS as an offline fallback.
         """
-        config = self._get_config()
-        configured = _repo_names_from_payload({"repos": config.get("repos")})
-        if configured:
-            return configured
+        return self._list_repos_with_source()[0]
 
-        now = time.monotonic()
-        cached: Optional[List[str]] = _REPO_LIST_CACHE.get("repos")
-        if cached is not None and now < float(_REPO_LIST_CACHE.get("expires") or 0):
-            return list(cached)
-
-        res, err = self._api_request("GET", "/v1/workspace/list")
-        names = _repo_names_from_payload(res) if not err else []
-        if not names:
-            names = list(DEFAULT_REPOS)
-
-        _REPO_LIST_CACHE["repos"] = list(names)
-        _REPO_LIST_CACHE["expires"] = now + REPO_LIST_TTL_SECONDS
-        return names
+    def _repo_list_notice(self):
+        """``(text, file_entry)`` for the root notice, or ``(None, None)``
+        when the repository list is authoritative (config or server)."""
+        _names, source, detail = self._list_repos_with_source()
+        if source != REPO_SOURCE_FALLBACK:
+            return None, None
+        text = repo_list_notice_text(detail)
+        entry = {
+            "path": REPO_LIST_NOTICE_NAME,
+            "size": len(text.encode("utf-8")),
+            "mtime": _REPO_LIST_NOTICE_MTIME,
+        }
+        return text, entry
 
     def _api_request(self, method, endpoint, params=None, data=None):
-        import uuid
+        """Call Gravity as the logged-in user; see :func:`gravity_api_request`.
 
-        config = self._get_config()
-        # Base URL is {server}/gravity by default (production nginx prefix);
-        # see orbit.config.resolve_gravity_base_url for overrides.
-        url = gravity_api_url(endpoint, config)
-        token = config.get("token", "")
-        if not url:
-            return None, "Not logged in"
-
-        if params:
-            url += "?" + urllib.parse.urlencode(params)
-
-        trace_id = f"trace_{uuid.uuid4().hex}"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "x-trace-id": trace_id,
-        }
-
-        req_data = None
-        if data:
-            req_data = json.dumps(data).encode("utf-8")
-
-        req = urllib.request.Request(url, headers=headers, method=method, data=req_data)
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode("utf-8")), None
-        except urllib.error.HTTPError as e:
-            try:
-                err_msg = json.loads(e.read().decode("utf-8")).get("detail", str(e))
-            except Exception:
-                err_msg = str(e)
-            return None, err_msg
-        except Exception as e:
-            return None, str(e)
+        Errors come back as :class:`GravityError` (a ``str`` carrying the
+        HTTP status), so ``if err:`` keeps working for every caller.
+        """
+        return gravity_api_request(
+            method, endpoint, params=params, data=data, config=self._get_config()
+        )
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -335,9 +565,23 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
 
         if not parts:
             # Root directory (List of repositories): config override, then
-            # the server, then the DEFAULT_REPOS offline fallback.
+            # the server, then the DEFAULT_REPOS offline fallback. In
+            # fallback mode the notice file sits next to the folders.
             repos = self._list_repos()
-            xml_response = self._render_collection("/", repos if depth == "1" else [])
+            _text, notice = self._repo_list_notice()
+            xml_response = self._render_collection(
+                "/",
+                repos if depth == "1" else [],
+                [notice] if depth == "1" and notice else [],
+            )
+        elif len(parts) == 1 and parts[0] == REPO_LIST_NOTICE_NAME:
+            _text, notice = self._repo_list_notice()
+            if notice is None:
+                self.send_error(404, "Not found")
+                return
+            xml_response = self._render_file_metadata(
+                f"/{REPO_LIST_NOTICE_NAME}", notice
+            )
         elif len(parts) == 1:
             xml_response = self._propfind_repo(parts[0], depth)
         else:
@@ -396,6 +640,13 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.unquote(self.path).strip("/")
         parts = [p for p in path.split("/") if p]
+        if len(parts) == 1 and parts[0] == REPO_LIST_NOTICE_NAME:
+            text, _notice = self._repo_list_notice()
+            if text is None:
+                self.send_error(404, "Not found")
+                return
+            self._send_bytes(text.encode("utf-8"), "text/plain; charset=utf-8")
+            return
         if len(parts) < 2:
             self.send_error(403, "Access Denied")
             return
@@ -410,22 +661,45 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
             self.send_error(404, f"File not found: {err}")
             return
 
-        raw_content = res.get("content", "")
-        if self._response_is_binary(res, file_path):
-            try:
-                content = base64.b64decode(raw_content)
-            except Exception:
-                content = raw_content.encode("utf-8", errors="ignore")
-            VFS_FILE_CACHE[path] = content
-        else:
-            VFS_FILE_CACHE[path] = raw_content
-            content = raw_content.encode("utf-8")
+        cached = self._decode_file_response(res, file_path)
+        VFS_FILE_CACHE[path] = cached
+        content = cached if isinstance(cached, bytes) else cached.encode("utf-8")
+        self._send_bytes(content, "application/octet-stream")
 
+    def _send_bytes(self, content, content_type):
         self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
+
+    @classmethod
+    def _decode_file_response(cls, res, file_path):
+        """Content of a ``/v1/workspace/file`` body: ``bytes`` for binary, ``str`` for text."""
+        raw_content = res.get("content", "")
+        if cls._response_is_binary(res, file_path):
+            try:
+                return base64.b64decode(raw_content)
+            except Exception:
+                return raw_content.encode("utf-8", errors="ignore")
+        return raw_content
+
+    def _server_has_content(self, repo_name, file_path, body):
+        """Re-read ``file_path`` from Gravity and compare it with ``body``.
+
+        Used after a write the server claims changed nothing, when the
+        client had no cached copy to know whether that claim is plausible.
+        """
+        res, err = self._api_request(
+            "GET", "/v1/workspace/file", {"repo_name": repo_name, "path": file_path}
+        )
+        if err:
+            return False
+        remote = self._decode_file_response(res, file_path)
+        if isinstance(remote, bytes) != isinstance(body, bytes):
+            remote = remote.encode("utf-8") if isinstance(remote, str) else remote
+            body = body.encode("utf-8") if isinstance(body, str) else body
+        return remote == body
 
     @staticmethod
     def _response_is_binary(res, file_path):
@@ -458,6 +732,11 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
             "modules.txt"
         )
         original_content = VFS_FILE_CACHE.get(path)
+        # Whether the client *knows* the content it sends differs from what
+        # the server has: True (a real patch / differing bytes), False (a
+        # full-content write identical to the cached copy) or None (nothing
+        # cached, so unknown). See _write_failure_from_response.
+        content_changed: Optional[bool] = None
         # Binary if the extension says so, if the server delivered it as
         # binary on read (bytes in the cache), or if the body is not UTF-8.
         is_binary = _is_binary_path(file_path) or isinstance(
@@ -475,14 +754,12 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
             # raw bytes as-is and diff/store them as bytes, matching how do_GET
             # caches binary content (see _is_binary_path usage above).
             body = raw_body
-            if (
-                not is_special_file
-                and isinstance(original_content, (bytes, bytearray))
-                and original_content == body
-            ):
-                self.send_response(204)
-                self.end_headers()
-                return
+            if isinstance(original_content, (bytes, bytearray)):
+                content_changed = bytes(original_content) != body
+                if not is_special_file and not content_changed:
+                    self.send_response(204)
+                    self.end_headers()
+                    return
 
             content_to_send = base64.b64encode(body).decode("ascii")
             change_type = "modified"
@@ -500,7 +777,10 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
 
                 content_to_send = diff_text
                 change_type = "patch"
+                content_changed = True
             else:
+                if isinstance(original_content, str):
+                    content_changed = original_content != body
                 content_to_send = body
                 change_type = "modified"
 
@@ -513,10 +793,21 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         }
         res, err = self._api_request("POST", "/v1/workspace/file", data=data)
         if err:
-            self.send_error(500, f"Failed to save changes to Gravity: {err}")
+            # Keep Gravity's status where it means something to the editor
+            # (409 conflict); anything else is a generic failure.
+            status, message = _write_failure_from_error(err)
+            self.send_error(status, f"Failed to save changes to Gravity: {message}")
             return
 
-        failure = _write_failure_from_response(res)
+        if content_changed is None and _response_reports_no_changes(res):
+            # Nothing was cached, so we cannot tell from here whether "No
+            # changes to push" is honest (a no-op save) or a dropped write.
+            # Ask the server what it has now.
+            content_changed = not self._server_has_content(repo_name, file_path, body)
+
+        failure = _write_failure_from_response(
+            res, content_changed=bool(content_changed)
+        )
         if failure is not None:
             # Gravity answered 200 but did not apply the change (e.g. a patch
             # conflict). Tell the editor, and keep the cache at the content
@@ -577,7 +868,7 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.end_headers()
 
-    def _render_collection(self, prefix, folders):
+    def _render_collection(self, prefix, folders, files=()):
         lines = []
         lines.append('<?xml version="1.0" encoding="utf-8" ?>')
         lines.append('<d:multistatus xmlns:d="DAV:">')
@@ -607,8 +898,31 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
             lines.append("    </d:propstat>")
             lines.append("  </d:response>")
 
+        for f in files:
+            lines.extend(self._file_response_lines(f"{prefix}{f['path']}", f))
+
         lines.append("</d:multistatus>")
         return "\n".join(lines)
+
+    @staticmethod
+    def _file_response_lines(href, file_info):
+        dt = datetime.fromtimestamp(file_info.get("mtime", 0))
+        http_date = email.utils.format_datetime(dt)
+        name = os.path.basename(file_info["path"])
+        return [
+            "  <d:response>",
+            f"    <d:href>{href}</d:href>",
+            "    <d:propstat>",
+            "      <d:prop>",
+            f"        <d:displayname>{name}</d:displayname>",
+            f"        <d:getcontentlength>{file_info['size']}</d:getcontentlength>",
+            "        <d:resourcetype/>",
+            f"        <d:getlastmodified>{http_date}</d:getlastmodified>",
+            "      </d:prop>",
+            "      <d:status>HTTP/1.1 200 OK</d:status>",
+            "    </d:propstat>",
+            "  </d:response>",
+        ]
 
     def _render_single_dir(self, href):
         name = [x for x in href.split("/") if x][-1]

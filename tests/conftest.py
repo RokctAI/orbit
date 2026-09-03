@@ -11,6 +11,8 @@ real config, CLI and VFS code paths are exercised.
 """
 
 import sys
+import urllib.error
+import urllib.request
 from types import SimpleNamespace
 
 import pytest
@@ -39,6 +41,13 @@ def isolated_config(tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     # ``None`` in sys.modules makes ``import keyring`` raise ImportError.
     monkeypatch.setitem(sys.modules, "keyring", None)
+
+    # No test may reach a real Gravity. Tests that need a server replace this
+    # with an in-process fake (see ``gravity`` in test_vfs.py).
+    def no_network(req, timeout=None):
+        raise urllib.error.URLError("network access is disabled in tests")
+
+    monkeypatch.setattr(urllib.request, "urlopen", no_network)
     return config_dir / "config.json"
 
 

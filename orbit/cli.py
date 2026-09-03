@@ -50,6 +50,56 @@ TOKEN_SOURCE_LABELS = {
     "file": "~/.orbit/config.json (plaintext; no keyring available)",
 }
 
+# How long `orbit status`/`orbit mount` wait for the repository list.
+REPO_LIST_TIMEOUT_SECONDS = 10
+
+
+def _report_repo_list(config):
+    """Print where the drive-root repository list comes from.
+
+    When Gravity cannot enumerate repositories and no ``repos`` override is
+    set, the mounted drive falls back to a built-in list that may name
+    repositories which no longer exist on the server. Say so plainly rather
+    than letting the user discover it as a "Gravity error" on open.
+    """
+    from orbit.vfs import (
+        REPO_LIST_NOTICE_NAME,
+        REPO_SOURCE_CONFIG,
+        REPO_SOURCE_SERVER,
+        gravity_api_request,
+        resolve_repo_list,
+    )
+
+    def request(method, endpoint):
+        return gravity_api_request(
+            method, endpoint, config=config, timeout=REPO_LIST_TIMEOUT_SECONDS
+        )
+
+    names, source, detail = resolve_repo_list(config, request)
+    listing = ", ".join(names)
+    if source == REPO_SOURCE_CONFIG:
+        click.echo(
+            f"   Repos: {len(names)} from 'repos' in ~/.orbit/config.json ({listing})"
+        )
+    elif source == REPO_SOURCE_SERVER:
+        click.echo(f"   Repos: {len(names)} listed by the Gravity server ({listing})")
+    else:
+        click.echo(f"   Repos: ⚠️  no repository list available: {detail}.")
+        click.echo(
+            "          The mounted drive shows Orbit's built-in fallback list, which is"
+        )
+        click.echo(
+            "          NOT verified against the server; some of these may not exist"
+        )
+        click.echo(f"          there and will fail to open: {listing}")
+        click.echo(
+            '          Fix: add "repos": ["<name>", ...] to ~/.orbit/config.json.'
+        )
+        click.echo(
+            f"          (The drive root also carries {REPO_LIST_NOTICE_NAME} saying this.)"
+        )
+    return names, source, detail
+
 
 @click.group()
 @click.version_option(version=__version__, prog_name="orbit")
@@ -265,6 +315,7 @@ def mount(port):
     time.sleep(1.5)
 
     click.echo(f"🛸 Mounting Gravity workspace via WebDAV on localhost:{port}...")
+    _report_repo_list(config)
 
     mounted = _mount_for_platform(url, port)
     if mounted is None:
@@ -301,6 +352,7 @@ def status():
             click.echo(
                 "   Auth: ❌ no token (checked ORBIT_TOKEN, the OS keyring and ~/.orbit/config.json)"
             )
+        _report_repo_list(config)
     else:
         click.echo("   Not connected. Run 'orbit login' first.")
 

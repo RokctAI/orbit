@@ -53,7 +53,20 @@ to talk to a Gravity container directly.
 
 The repositories shown at the root of the mounted drive come from the `repos`
 list in `config.json` if present, otherwise from the server when it provides a
-list, otherwise from a built-in offline fallback.
+list, otherwise from a built-in offline fallback. The fallback is not verified
+against the server (it may name repositories that no longer exist there), so
+when it is in use `orbit status` and `orbit mount` say so, and the drive root
+carries a `00-ORBIT-REPO-LIST-UNAVAILABLE.txt` file explaining how to set
+`"repos": [...]` in `config.json`.
+
+### Saves that did not land
+
+A save is only reported to the editor as successful when Gravity actually
+persisted it. A conflict comes back as HTTP 409 (whether Gravity answers 409
+itself or a 200 body with `"conflict": true`), and a `"No changes to push"`
+answer to content the client knows it changed is reported as a failed save
+rather than silently accepted (this happens against a Gravity server older
+than this client).
 
 ## Native diff helpers (`orbit_diff_rs`)
 

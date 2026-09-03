@@ -43,8 +43,11 @@ class FakeGravity:
         self.write_response = {
             "status": True,
             "message": "Workspace changes processed",
-            "results": {"control": "OK"},
+            "results": {"control": "Pushed successfully"},
         }
+        # ``(http_status, json_body)`` to answer the write with an HTTP error
+        # instead (the current Gravity raises 409 on a patch conflict).
+        self.write_error = None
         # Keys served in the pre-"encoding" shape ({"content", "is_binary"}).
         self.legacy_keys = set()
 
@@ -72,6 +75,9 @@ class FakeGravity:
 
         if parsed.path.endswith("/v1/workspace/file"):
             if req.get_method() == "POST":
+                if self.write_error is not None:
+                    code, payload = self.write_error
+                    return self._error_body(req.full_url, code, payload)
                 return self._json(self.write_response)
             key = (query.get("repo_name"), query.get("path"))
             if key not in self.contents:
@@ -98,14 +104,18 @@ class FakeGravity:
         # io.BytesIO already supports the context-manager protocol urlopen callers use.
         return io.BytesIO(json.dumps(payload).encode("utf-8"))
 
+    @classmethod
+    def _error(cls, url, code, detail):
+        cls._error_body(url, code, {"detail": detail})
+
     @staticmethod
-    def _error(url, code, detail):
+    def _error_body(url, code, payload):
         raise urllib.error.HTTPError(
             url,
             code,
-            detail,
+            http.client.responses.get(code, "Error"),
             email.message.Message(),
-            io.BytesIO(json.dumps({"detail": detail}).encode()),
+            io.BytesIO(json.dumps(payload).encode()),
         )
 
 
@@ -226,7 +236,95 @@ def test_root_falls_back_to_default_repos_when_server_cannot_list(
     # Today's Gravity requires repo_name on /v1/workspace/list (422 without it).
     status, xml = dav("PROPFIND", "/", headers={"Depth": "1"})
     assert status == 207
-    assert _hrefs(xml) == ["/"] + [f"/{name}/" for name in vfs.DEFAULT_REPOS]
+    hrefs = _hrefs(xml)
+    assert hrefs[: 1 + len(vfs.DEFAULT_REPOS)] == ["/"] + [
+        f"/{name}/" for name in vfs.DEFAULT_REPOS
+    ]
+    # The unverified list is never presented as real without saying so.
+    assert hrefs[-1] == f"/{vfs.REPO_LIST_NOTICE_NAME}"
+    text = xml.decode("utf-8")
+    notice_block = text.split(f"<d:href>/{vfs.REPO_LIST_NOTICE_NAME}</d:href>", 1)[1]
+    assert "<d:resourcetype/>" in notice_block.split("</d:response>", 1)[0]
+
+
+def test_root_notice_explains_the_fallback_and_how_to_fix_it(logged_in, gravity, dav):
+    status, body = dav("GET", f"/{vfs.REPO_LIST_NOTICE_NAME}")
+    assert status == 200
+    text = body.decode("utf-8")
+    assert "could not get the list of repositories" in text
+    assert "no repository-enumeration route" in text, "422 must be explained"
+    assert "NOT been verified" in text
+    assert '"repos"' in text and "config.json" in text
+    for name in vfs.DEFAULT_REPOS:
+        assert name in text
+
+    status, xml = dav(
+        "PROPFIND", f"/{vfs.REPO_LIST_NOTICE_NAME}", headers={"Depth": "0"}
+    )
+    assert status == 207
+    assert _hrefs(xml) == [f"/{vfs.REPO_LIST_NOTICE_NAME}"]
+    assert f"<d:getcontentlength>{len(body)}</d:getcontentlength>" in xml.decode()
+
+    # Not writable: it is an explanation, not a workspace file.
+    assert dav("PUT", f"/{vfs.REPO_LIST_NOTICE_NAME}", body=b"x")[0] == 403
+
+
+def test_root_notice_names_an_unreachable_server(logged_in, dav):
+    # conftest blocks the network: the server cannot be reached at all.
+    status, body = dav("GET", f"/{vfs.REPO_LIST_NOTICE_NAME}")
+    assert status == 200
+    assert "could not reach Gravity" in body.decode("utf-8")
+
+
+def test_root_notice_is_absent_when_the_list_is_authoritative(logged_in, gravity, dav):
+    gravity.repos = ["rcore", "control"]
+    status, xml = dav("PROPFIND", "/", headers={"Depth": "1"})
+    assert _hrefs(xml) == ["/", "/rcore/", "/control/"]
+    assert dav("GET", f"/{vfs.REPO_LIST_NOTICE_NAME}")[0] == 404
+    assert (
+        dav("PROPFIND", f"/{vfs.REPO_LIST_NOTICE_NAME}", headers={"Depth": "0"})[0]
+        == 404
+    )
+
+    vfs._reset_repo_list_cache()
+    config = cfg.load_orbit_config()
+    config["repos"] = ["alpha"]
+    cfg.save_orbit_config(config)
+    status, xml = dav("PROPFIND", "/", headers={"Depth": "1"})
+    assert _hrefs(xml) == ["/", "/alpha/"]
+    assert dav("GET", f"/{vfs.REPO_LIST_NOTICE_NAME}")[0] == 404
+
+
+def test_resolve_repo_list_reports_its_source():
+    config = {"server": SERVER, "token": TOKEN}
+
+    def unsupported(method, endpoint):
+        return None, vfs.GravityError("Field required: repo_name", status=422)
+
+    names, source, detail = vfs.resolve_repo_list(config, unsupported)
+    assert (names, source) == (list(vfs.DEFAULT_REPOS), vfs.REPO_SOURCE_FALLBACK)
+    assert "no repository-enumeration route" in detail
+
+    def offline(method, endpoint):
+        return None, vfs.GravityError("<urlopen error [Errno 111] refused>")
+
+    _names, source, detail = vfs.resolve_repo_list(config, offline)
+    assert source == vfs.REPO_SOURCE_FALLBACK
+    assert detail.startswith("could not reach Gravity")
+
+    def listing(method, endpoint):
+        return {"repos": ["rcore"]}, None
+
+    assert vfs.resolve_repo_list(config, listing) == (
+        ["rcore"],
+        vfs.REPO_SOURCE_SERVER,
+        "",
+    )
+    assert vfs.resolve_repo_list(dict(config, repos=["x"]), listing) == (
+        ["x"],
+        vfs.REPO_SOURCE_CONFIG,
+        "",
+    )
 
 
 def test_root_prefers_repos_from_config_file_without_calling_server(
@@ -476,6 +574,204 @@ def test_put_surfaces_server_conflict_and_keeps_cache_at_server_content(
     assert status == 204
     assert "+import sys\n" in gravity.requests[-1]["body"]["content"]
     assert vfs.VFS_FILE_CACHE["control/src/app.py"] == NEW_APP
+
+
+def test_put_against_old_server_no_changes_reply_is_not_reported_as_saved(
+    logged_in, gravity, dav
+):
+    """Deploy skew: an older Gravity answers 200/"No changes to push" and drops
+    the patch. Three successive saves must not all be told "saved"."""
+    dav("GET", "/control/src/app.py")
+    # Exact body the older server returns for a write it did not commit.
+    gravity.write_response = {
+        "status": True,
+        "message": "Workspace changes processed",
+        "results": {"control": "No changes to push"},
+    }
+    new_body = NEW_APP.encode("utf-8")
+    status, body = dav(
+        "PUT",
+        "/control/src/app.py",
+        headers={"Content-Length": str(len(new_body))},
+        body=new_body,
+    )
+    assert status == 500, "a dropped write must not be reported as a save"
+    assert b"No changes to push" in body and b"NOT persisted" in body
+    assert gravity.requests[-1]["body"]["type"] == "patch"
+    # Cache stays at the server's content so the next save re-sends the change.
+    assert vfs.VFS_FILE_CACHE["control/src/app.py"] == ORIGINAL_APP
+
+    status, _ = dav(
+        "PUT",
+        "/control/src/app.py",
+        headers={"Content-Length": str(len(new_body))},
+        body=new_body,
+    )
+    assert status == 500
+    assert "+import sys\n" in gravity.requests[-1]["body"]["content"]
+
+
+def test_put_binary_against_old_server_no_changes_reply_fails(logged_in, gravity, dav):
+    dav("GET", "/control/logo.png")
+    gravity.write_response = {
+        "status": True,
+        "results": {"control": "No changes to push"},
+    }
+    payload = b"\x89PNG\r\n\x1a\n\xff\x00"
+    status, _ = dav(
+        "PUT",
+        "/control/logo.png",
+        headers={"Content-Length": str(len(payload))},
+        body=payload,
+    )
+    assert status == 500
+    assert vfs.VFS_FILE_CACHE["control/logo.png"] == b"\x89PNG\r\n\x1a\n\x00\x01"
+
+
+def test_put_paired_repo_partial_push_is_a_save(logged_in, gravity, dav):
+    """Paired public/private repos: one side pushed means the change landed."""
+    dav("GET", "/control/src/app.py")
+    gravity.write_response = {
+        "status": True,
+        "results": {"control": "Public: Pushed, Private: No Changes"},
+    }
+    new_body = NEW_APP.encode("utf-8")
+    status, _ = dav(
+        "PUT",
+        "/control/src/app.py",
+        headers={"Content-Length": str(len(new_body))},
+        body=new_body,
+    )
+    assert status == 204
+    assert vfs.VFS_FILE_CACHE["control/src/app.py"] == NEW_APP
+
+
+def test_put_without_cache_verifies_a_no_changes_reply_against_the_server(
+    logged_in, gravity, dav
+):
+    """With nothing cached the client cannot know whether "No changes" is
+    honest, so it re-reads the file: identical -> saved, different -> failed."""
+    gravity.write_response = {
+        "status": True,
+        "results": {"control": "No changes to push"},
+    }
+
+    body = ORIGINAL_APP.encode("utf-8")  # what the server already has: a no-op save
+    status, _ = dav(
+        "PUT",
+        "/control/src/app.py",
+        headers={"Content-Length": str(len(body))},
+        body=body,
+    )
+    assert status == 204
+    assert gravity.requests[-1]["method"] == "GET", "the reply must be verified"
+    assert vfs.VFS_FILE_CACHE["control/src/app.py"] == ORIGINAL_APP
+
+    vfs.VFS_FILE_CACHE.clear()
+    body = NEW_APP.encode("utf-8")  # differs from the server: the write was dropped
+    status, resp = dav(
+        "PUT",
+        "/control/src/app.py",
+        headers={"Content-Length": str(len(body))},
+        body=body,
+    )
+    assert status == 500
+    assert b"NOT persisted" in resp
+    assert "control/src/app.py" not in vfs.VFS_FILE_CACHE
+
+
+def test_write_failure_from_response_shapes():
+    old_server = {
+        "status": True,
+        "message": "Workspace changes processed",
+        "results": {"control": "No changes to push"},
+    }
+    assert vfs._write_failure_from_response(old_server)[0] == 500
+    assert vfs._write_failure_from_response(old_server, content_changed=False) is None
+    assert (
+        vfs._write_failure_from_response(
+            {"status": True, "results": {"control": "Pushed successfully"}}
+        )
+        is None
+    )
+    assert (
+        vfs._write_failure_from_response(
+            {
+                "status": True,
+                "results": {"x": "Public: No Changes, Private: No Changes"},
+            }
+        )[0]
+        == 500
+    )
+    assert (
+        vfs._write_failure_from_response({"status": False, "conflict": True})[0] == 409
+    )
+    assert vfs._write_failure_from_response("nonsense")[0] == 500
+
+
+def test_put_conflict_answered_with_http_409_stays_a_409(logged_in, gravity, dav):
+    """The current Gravity raises 409 on a patch conflict; it must reach the
+    editor as 409, not be flattened into a 500."""
+    dav("GET", "/control/src/app.py")
+    gravity.write_error = (
+        409,
+        {
+            "detail": {
+                "message": "Merge conflict occurred.",
+                "conflicts": ["control/src/app.py"],
+            }
+        },
+    )
+    new_body = NEW_APP.encode("utf-8")
+    status, body = dav(
+        "PUT",
+        "/control/src/app.py",
+        headers={"Content-Length": str(len(new_body))},
+        body=new_body,
+    )
+    assert status == 409
+    assert b"Merge conflict occurred." in body
+    assert b"control/src/app.py" in body
+    assert vfs.VFS_FILE_CACHE["control/src/app.py"] == ORIGINAL_APP
+
+
+def test_put_other_http_errors_are_still_500(logged_in, gravity, dav):
+    dav("GET", "/control/src/app.py")
+    gravity.write_error = (500, {"detail": "Sync failed for control: Git Push Error"})
+    new_body = NEW_APP.encode("utf-8")
+    status, body = dav(
+        "PUT",
+        "/control/src/app.py",
+        headers={"Content-Length": str(len(new_body))},
+        body=new_body,
+    )
+    assert status == 500
+    assert b"Git Push Error" in body
+
+
+def test_api_request_preserves_http_status_and_body(logged_in, gravity):
+    gravity.write_error = (409, {"detail": {"message": "Merge conflict occurred."}})
+    payload, err = vfs.gravity_api_request(
+        "POST", "/v1/workspace/file", data={"repo_name": "control"}
+    )
+    assert payload is None
+    assert isinstance(err, vfs.GravityError)
+    assert err.status == 409
+    assert err.body == {"detail": {"message": "Merge conflict occurred."}}
+    assert str(err) == "Merge conflict occurred."
+    assert bool(err), "errors must stay truthy for `if err:` callers"
+
+    _payload, err = vfs.gravity_api_request("GET", "/v1/workspace/list")
+    assert err.status == 422
+    assert str(err) == "Field required: repo_name"
+
+    _payload, err = vfs.gravity_api_request("GET", "/v1/workspace/file", {"path": "x"})
+    assert err.status == 404
+
+
+def test_api_request_without_login_or_network_has_no_status(gravity):
+    _payload, err = vfs.gravity_api_request("GET", "/v1/workspace/list")
+    assert err == "Not logged in" and err.status is None
 
 
 def test_put_surfaces_status_false_without_conflict_as_500(logged_in, gravity, dav):
