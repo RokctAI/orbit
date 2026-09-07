@@ -70,6 +70,25 @@ except ImportError:
 # Cache entries are always `bytes` for binary files and `str` for text files.
 VFS_FILE_CACHE = {}
 
+# Files Gravity splits between a paired public/private repository and serves
+# back as one merged view. ``/v1/workspace/list`` only knows the size of one
+# half of such a file, so their size is taken from the merged content instead
+# (see _with_merged_sizes).
+#
+# FLAGGED: Gravity's default split rules (hooks.py, modules.txt) can be
+# extended per repository through a ``.orbitsplit`` file that this client
+# does not read yet; custom rules keep the list's (half) size.
+SPLIT_RULE_FILES = ("hooks.py", "modules.txt")
+
+# (repo_name, path) -> (mtime, merged_size) so a directory PROPFIND does not
+# re-fetch a split file until the listing reports a different mtime.
+_MERGED_SIZE_CACHE: Dict[Any, Any] = {}
+
+
+def _is_split_rule_path(file_path) -> bool:
+    return str(file_path).endswith(SPLIT_RULE_FILES)
+
+
 # Offline fallback for the list of repositories shown at the root of the
 # drive. It is used only when neither the ``repos`` field of
 # ~/.orbit/config.json nor the Gravity server supplies a list.
@@ -410,7 +429,21 @@ def _response_reports_no_changes(res) -> bool:
     return any(_result_reports_no_changes(v) for v in res["results"].values())
 
 
-def _write_failure_from_response(res, content_changed=True):
+def _response_lacks_result(res, repo_name=None) -> bool:
+    """Whether a write response carries no per-repo result for ``repo_name``.
+
+    Gravity answers a write into a repository it does not know with
+    ``{"status": true, ..., "results": {}}``: nothing was written anywhere.
+    """
+    if not isinstance(res, dict) or not isinstance(res.get("results"), dict):
+        return False
+    results = res["results"]
+    if not results:
+        return True
+    return repo_name is not None and repo_name not in results
+
+
+def _write_failure_from_response(res, content_changed=True, repo_name=None):
     """Map a Gravity write response body to ``(http_status, message)`` or None.
 
     Gravity answers a failed patch with HTTP 200 and a body such as
@@ -422,7 +455,9 @@ def _write_failure_from_response(res, content_changed=True):
     differ from the cached copy). In that case a ``"No changes to push"``
     result is a contradiction: the server dropped the change (seen with a
     Gravity older than this client), and reporting success would make the
-    editor believe a save that never landed.
+    editor believe a save that never landed. Likewise an empty ``results``
+    (or one without ``repo_name``) means Gravity does not know the
+    repository and wrote nothing.
     """
     if not isinstance(res, dict):
         return 500, "Unexpected response from Gravity"
@@ -432,6 +467,15 @@ def _write_failure_from_response(res, content_changed=True):
         return 409, f"{detail} ({conflicts})" if conflicts else detail
     if not res.get("status", True):
         return 500, str(res.get("message") or "Gravity rejected the change")
+    if content_changed and _response_lacks_result(res, repo_name):
+        target = f" for repository '{repo_name}'" if repo_name else ""
+        return 500, (
+            f"Gravity reported no result{target} (results: "
+            f"{json.dumps(res.get('results'))}), so the change was NOT "
+            "persisted: the server does not know that repository. Check the "
+            'name against `orbit status` or the "repos" list in '
+            "~/.orbit/config.json."
+        )
     if content_changed and isinstance(res.get("results"), dict):
         for repo, outcome in res["results"].items():
             if _result_reports_no_changes(outcome):
@@ -628,6 +672,7 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
             self.send_error(500, f"Gravity error: {err}")
             return None
         subdirs, children = _direct_children(res.get("files", []), "")
+        children = self._with_merged_sizes(repo_name, children)
         return self._render_files(f"/{repo_name}/", children, subdirs)
 
     def _propfind_path(self, repo_name, file_path, depth):
@@ -650,12 +695,56 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
             if depth == "0":
                 return self._render_single_dir(f"/{repo_name}/{file_path}/")
             subdirs, children = _direct_children(files, file_path)
+            children = self._with_merged_sizes(repo_name, children)
             return self._render_files(f"/{repo_name}/{file_path}/", children, subdirs)
         if matched:
-            return self._render_file_metadata(f"/{repo_name}/{file_path}", matched[0])
+            entry = self._with_merged_sizes(repo_name, matched[:1])[0]
+            return self._render_file_metadata(f"/{repo_name}/{file_path}", entry)
 
         self.send_error(404, "Not found")
         return None
+
+    def _with_merged_sizes(self, repo_name, entries):
+        """Replace the listed size of split-rule files with their merged size.
+
+        ``/v1/workspace/list`` reports one half of a file Gravity merges from
+        a paired public/private repository, while GET returns the merged
+        view; a WebDAV client trusting the advertised length would truncate
+        it. Only split-rule entries are fetched (never every file), and the
+        result is cached per (repo, path, mtime). When the merged content
+        cannot be read, ``size`` becomes None and ``getcontentlength`` is
+        omitted so clients fall back to the GET body.
+        """
+        out = []
+        for entry in entries:
+            if not _is_split_rule_path(entry.get("path", "")):
+                out.append(entry)
+                continue
+            fixed = dict(entry)
+            fixed["size"] = self._merged_size(repo_name, entry)
+            out.append(fixed)
+        return out
+
+    def _merged_size(self, repo_name, entry):
+        file_path = str(entry.get("path", ""))
+        key = (repo_name, file_path)
+        mtime = entry.get("mtime")
+        cached = _MERGED_SIZE_CACHE.get(key)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+
+        res, err = self._api_request(
+            "GET", "/v1/workspace/file", {"repo_name": repo_name, "path": file_path}
+        )
+        if err:
+            return None
+        content = self._decode_file_response(res, file_path)
+        # The merged view is exactly what a GET would return, so it is also
+        # the right diff base for a later save.
+        VFS_FILE_CACHE[f"{repo_name}/{file_path}"] = content
+        size = len(content if isinstance(content, bytes) else content.encode("utf-8"))
+        _MERGED_SIZE_CACHE[key] = (mtime, size)
+        return size
 
     def do_GET(self):
         path = urllib.parse.unquote(self.path).strip("/")
@@ -750,9 +839,7 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", 0))
         raw_body = self.rfile.read(content_length)
 
-        is_special_file = file_path.endswith("hooks.py") or file_path.endswith(
-            "modules.txt"
-        )
+        is_special_file = _is_split_rule_path(file_path)
         original_content = VFS_FILE_CACHE.get(path)
         # Whether the client *knows* the content it sends differs from what
         # the server has: True (a real patch / differing bytes), False (a
@@ -821,14 +908,16 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
             self.send_error(status, f"Failed to save changes to Gravity: {message}")
             return
 
-        if content_changed is None and _response_reports_no_changes(res):
+        if content_changed is None and (
+            _response_reports_no_changes(res) or _response_lacks_result(res, repo_name)
+        ):
             # Nothing was cached, so we cannot tell from here whether "No
-            # changes to push" is honest (a no-op save) or a dropped write.
-            # Ask the server what it has now.
+            # changes to push" (or an empty result) is honest (a no-op save)
+            # or a dropped write. Ask the server what it has now.
             content_changed = not self._server_has_content(repo_name, file_path, body)
 
         failure = _write_failure_from_response(
-            res, content_changed=bool(content_changed)
+            res, content_changed=bool(content_changed), repo_name=repo_name
         )
         if failure is not None:
             # Gravity answered 200 but did not apply the change (e.g. a patch
@@ -928,23 +1017,33 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _file_response_lines(href, file_info):
+        """One ``<d:response>`` for a file. A ``size`` of None omits
+        ``getcontentlength`` (RFC 4918 does not require it) so the client
+        sizes the file from the GET body instead of a wrong length."""
         dt = datetime.fromtimestamp(file_info.get("mtime", 0))
         http_date = email.utils.format_datetime(dt)
         name = os.path.basename(file_info["path"])
-        return [
+        size = file_info.get("size")
+        lines = [
             "  <d:response>",
             f"    <d:href>{href}</d:href>",
             "    <d:propstat>",
             "      <d:prop>",
             f"        <d:displayname>{name}</d:displayname>",
-            f"        <d:getcontentlength>{file_info['size']}</d:getcontentlength>",
-            "        <d:resourcetype/>",
-            f"        <d:getlastmodified>{http_date}</d:getlastmodified>",
-            "      </d:prop>",
-            "      <d:status>HTTP/1.1 200 OK</d:status>",
-            "    </d:propstat>",
-            "  </d:response>",
         ]
+        if size is not None:
+            lines.append(f"        <d:getcontentlength>{size}</d:getcontentlength>")
+        lines.extend(
+            [
+                "        <d:resourcetype/>",
+                f"        <d:getlastmodified>{http_date}</d:getlastmodified>",
+                "      </d:prop>",
+                "      <d:status>HTTP/1.1 200 OK</d:status>",
+                "    </d:propstat>",
+                "  </d:response>",
+            ]
+        )
+        return lines
 
     def _render_single_dir(self, href):
         name = [x for x in href.split("/") if x][-1]
@@ -1007,48 +1106,16 @@ class OrbitWebDAVHandler(BaseHTTPRequestHandler):
             if prefix.endswith(path_part + "/"):
                 continue
             name = os.path.basename(path_part)
-
-            # Map mtime to HTTP date format
-            dt = datetime.fromtimestamp(f.get("mtime", 0))
-            http_date = email.utils.format_datetime(dt)
-
-            lines.append("  <d:response>")
-            lines.append(f"    <d:href>{prefix}{name}</d:href>")
-            lines.append("    <d:propstat>")
-            lines.append("      <d:prop>")
-            lines.append(f"        <d:displayname>{name}</d:displayname>")
-            lines.append(
-                f"        <d:getcontentlength>{f['size']}</d:getcontentlength>"
-            )
-            lines.append("        <d:resourcetype/>")
-            lines.append(f"        <d:getlastmodified>{http_date}</d:getlastmodified>")
-            lines.append("      </d:prop>")
-            lines.append("      <d:status>HTTP/1.1 200 OK</d:status>")
-            lines.append("    </d:propstat>")
-            lines.append("  </d:response>")
+            lines.extend(self._file_response_lines(f"{prefix}{name}", f))
 
         lines.append("</d:multistatus>")
         return "\n".join(lines)
 
     def _render_file_metadata(self, href, file_info):
-        dt = datetime.fromtimestamp(file_info.get("mtime", 0))
-        http_date = email.utils.format_datetime(dt)
-        name = os.path.basename(file_info["path"])
         lines = [
             '<?xml version="1.0" encoding="utf-8" ?>',
             '<d:multistatus xmlns:d="DAV:">',
-            "  <d:response>",
-            f"    <d:href>{href}</d:href>",
-            "    <d:propstat>",
-            "      <d:prop>",
-            f"        <d:displayname>{name}</d:displayname>",
-            f"        <d:getcontentlength>{file_info['size']}</d:getcontentlength>",
-            "        <d:resourcetype/>",
-            f"        <d:getlastmodified>{http_date}</d:getlastmodified>",
-            "      </d:prop>",
-            "      <d:status>HTTP/1.1 200 OK</d:status>",
-            "    </d:propstat>",
-            "  </d:response>",
+            *self._file_response_lines(href, file_info),
             "</d:multistatus>",
         ]
         return "\n".join(lines)

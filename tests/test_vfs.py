@@ -135,7 +135,18 @@ FILES = [
     {"path": "src/my file.py", "size": 3, "mtime": 1700000003},
     {"path": "docs/app.py", "size": 4, "mtime": 1700000004},
     {"path": "data.blob", "size": 6, "mtime": 1700000005},
+    # A split-rule file: the listing knows only the public half (17 bytes),
+    # GET returns the merged public+private view (see MERGED_HOOKS).
+    {"path": "app/hooks.py", "size": 17, "mtime": 1700000006},
+    {"path": "app/__init__.py", "size": 0, "mtime": 1700000007},
 ]
+
+MERGED_HOOKS = (
+    "app_name = 'app'\n"
+    "# --- private section (merged by Gravity) ----\n"
+    "doc_events = {'ToDo': {}}\n"
+)
+assert len(MERGED_HOOKS.encode("utf-8")) == 90
 
 ORIGINAL_APP = "import os\n\n\ndef main():\n    print('hi')\n\n\nmain()\n"
 
@@ -158,6 +169,8 @@ def gravity(monkeypatch):
             ("control", "logo.png"): b"\x89PNG\r\n\x1a\n\x00\x01",
             ("control", "data.blob"): b"\x00\x01\x02\xff\xfe\xfd",
             ("control", "no-newline.txt"): "first\nlast",
+            ("control", "app/hooks.py"): MERGED_HOOKS,
+            ("control", "app/__init__.py"): "",
         },
     )
     monkeypatch.setattr(urllib.request, "urlopen", fake)
@@ -167,6 +180,7 @@ def gravity(monkeypatch):
 @pytest.fixture
 def dav():
     vfs.VFS_FILE_CACHE.clear()
+    vfs._MERGED_SIZE_CACHE.clear()
     vfs._reset_repo_list_cache()
     server = HTTPServer(("127.0.0.1", 0), vfs.OrbitWebDAVHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -185,6 +199,7 @@ def dav():
     server.shutdown()
     server.server_close()
     vfs.VFS_FILE_CACHE.clear()
+    vfs._MERGED_SIZE_CACHE.clear()
     vfs._reset_repo_list_cache()
 
 
@@ -416,9 +431,85 @@ def test_same_basename_in_different_directories_do_not_collide(logged_in, gravit
     assert _hrefs(xml) == ["/control/src/lib/util.py"]
 
 
+def _content_lengths(xml):
+    import re
+
+    text = xml.decode("utf-8")
+    out = {}
+    for block in text.split("<d:response>")[1:]:
+        href = re.search(r"<d:href>([^<]*)</d:href>", block).group(1)
+        m = re.search(r"<d:getcontentlength>(\d+)</d:getcontentlength>", block)
+        out[href] = int(m.group(1)) if m else None
+    return out
+
+
+def test_propfind_file_advertises_merged_size_for_split_files(logged_in, gravity, dav):
+    """The listing says 17 bytes (public half); GET returns 90 (merged)."""
+    status, xml = dav("PROPFIND", "/control/app/hooks.py", headers={"Depth": "0"})
+    assert status == 207
+    assert _content_lengths(xml) == {"/control/app/hooks.py": 90}
+    fetches = [r for r in gravity.requests if r["path"].endswith("/v1/workspace/file")]
+    assert [r["query"]["path"] for r in fetches] == ["app/hooks.py"]
+
+    # GET must deliver exactly the advertised number of bytes.
+    status, body = dav("GET", "/control/app/hooks.py")
+    assert status == 200 and len(body) == 90
+
+
+def test_propfind_directory_sizes_only_split_files_and_caches_them(
+    logged_in, gravity, dav
+):
+    status, xml = dav("PROPFIND", "/control/app/", headers={"Depth": "1"})
+    assert status == 207
+    lengths = _content_lengths(xml)
+    assert lengths["/control/app/hooks.py"] == 90
+    assert lengths["/control/app/__init__.py"] == 0, "listed size kept for other files"
+    fetches = [r for r in gravity.requests if r["path"].endswith("/v1/workspace/file")]
+    assert [r["query"]["path"] for r in fetches] == ["app/hooks.py"], (
+        "only split-rule files may be fetched to size them"
+    )
+
+    dav("PROPFIND", "/control/app/", headers={"Depth": "1"})
+    dav("PROPFIND", "/control/app/hooks.py", headers={"Depth": "0"})
+    fetches = [r for r in gravity.requests if r["path"].endswith("/v1/workspace/file")]
+    assert len(fetches) == 1, "same mtime: the merged size is cached"
+
+    # A newer listing mtime invalidates the cached size.
+    gravity.files = [
+        dict(f, mtime=f["mtime"] + 1) if f["path"] == "app/hooks.py" else f
+        for f in FILES
+    ]
+    dav("PROPFIND", "/control/app/hooks.py", headers={"Depth": "0"})
+    fetches = [r for r in gravity.requests if r["path"].endswith("/v1/workspace/file")]
+    assert len(fetches) == 2
+
+
+def test_propfind_omits_length_when_merged_view_cannot_be_read(logged_in, gravity, dav):
+    gravity.read_error = (500, {"detail": MERGED_VIEW_ERROR})
+    status, xml = dav("PROPFIND", "/control/app/", headers={"Depth": "1"})
+    assert status == 207, "a broken split file must not hide the directory"
+    lengths = _content_lengths(xml)
+    assert "/control/app/hooks.py" in lengths
+    assert lengths["/control/app/hooks.py"] is None, (
+        "never advertise the half size; omit it so the client uses the GET body"
+    )
+    assert lengths["/control/app/__init__.py"] == 0
+
+    status, xml = dav("PROPFIND", "/control/app/hooks.py", headers={"Depth": "0"})
+    assert status == 207
+    assert _content_lengths(xml) == {"/control/app/hooks.py": None}
+
+
+def test_propfind_never_fetches_regular_files(logged_in, gravity, dav):
+    dav("PROPFIND", "/control/", headers={"Depth": "1"})
+    dav("PROPFIND", "/control/src/", headers={"Depth": "1"})
+    dav("PROPFIND", "/control/src/app.py", headers={"Depth": "0"})
+    assert all(r["path"].endswith("/v1/workspace/list") for r in gravity.requests)
+
+
 def test_direct_children_helper():
     subdirs, children = vfs._direct_children(FILES, "")
-    assert subdirs == ["src", "docs"]
+    assert subdirs == ["src", "docs", "app"]
     assert [c["path"] for c in children] == ["README.md", "data.blob"]
     subdirs, children = vfs._direct_children(FILES, "src")
     assert subdirs == ["lib"]
@@ -670,6 +761,77 @@ def test_put_surfaces_server_conflict_and_keeps_cache_at_server_content(
     assert status == 204
     assert "+import sys\n" in gravity.requests[-1]["body"]["content"]
     assert vfs.VFS_FILE_CACHE["control/src/app.py"] == NEW_APP
+
+
+UNKNOWN_REPO_RESPONSE = {
+    "status": True,
+    "message": "Workspace changes processed",
+    "results": {},
+}
+
+
+def test_put_into_repo_gravity_does_not_know_is_not_reported_as_saved(
+    logged_in, gravity, dav
+):
+    """Exact answer for POST /v1/workspace/file with an unknown repo_name:
+    HTTP 200, status true, empty results - nothing was written anywhere."""
+    gravity.write_response = UNKNOWN_REPO_RESPONSE
+    body = b"print('lost?')\n"
+    # Nothing cached (a fresh file): the client verifies with a GET, which
+    # is 404 for a repository Gravity does not have.
+    status, resp = dav(
+        "PUT",
+        "/paas_pos/x.py",
+        headers={"Content-Length": str(len(body))},
+        body=body,
+    )
+    assert status == 500, "a write Gravity did not perform must not be a 204"
+    assert b"NOT persisted" in resp and b"paas_pos" in resp
+    assert gravity.requests[-1]["method"] == "GET", "the empty result is verified"
+    assert "paas_pos/x.py" not in vfs.VFS_FILE_CACHE
+
+
+def test_put_with_cache_into_repo_gravity_does_not_know_fails(logged_in, gravity, dav):
+    dav("GET", "/control/src/app.py")
+    gravity.write_response = UNKNOWN_REPO_RESPONSE
+    new_body = NEW_APP.encode("utf-8")
+    status, resp = dav(
+        "PUT",
+        "/control/src/app.py",
+        headers={"Content-Length": str(len(new_body))},
+        body=new_body,
+    )
+    assert status == 500
+    assert b"does not know that repository" in resp
+    assert vfs.VFS_FILE_CACHE["control/src/app.py"] == ORIGINAL_APP
+
+    # A result for some other repository is no better than none.
+    gravity.write_response = {
+        "status": True,
+        "results": {"other": "Pushed successfully"},
+    }
+    status, _ = dav(
+        "PUT",
+        "/control/src/app.py",
+        headers={"Content-Length": str(len(new_body))},
+        body=new_body,
+    )
+    assert status == 500
+
+
+def test_write_failure_for_empty_results():
+    assert vfs._write_failure_from_response(UNKNOWN_REPO_RESPONSE)[0] == 500
+    assert (
+        vfs._write_failure_from_response(UNKNOWN_REPO_RESPONSE, repo_name="paas_pos")[0]
+        == 500
+    )
+    assert (
+        vfs._write_failure_from_response(UNKNOWN_REPO_RESPONSE, content_changed=False)
+        is None
+    )
+    ok = {"status": True, "results": {"control": "Pushed successfully"}}
+    assert vfs._write_failure_from_response(ok, repo_name="control") is None
+    assert vfs._write_failure_from_response(ok, repo_name="paas_pos")[0] == 500
 
 
 def test_put_against_old_server_no_changes_reply_is_not_reported_as_saved(
