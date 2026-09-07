@@ -105,3 +105,6 @@ yarn-error.log*
 .svn/
 .swiftpm/
 migrate_working_dir/
+
+# Rust (orbit_diff_rs)
+orbit_diff_rs/target/

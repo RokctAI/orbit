@@ -44,10 +44,28 @@ try:
 except ImportError:
     HAS_TIKTOKEN = False
 
-# Path to Orbit Config
-CONFIG_DIR = os.path.expanduser("~/.orbit")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
-THEME_FILE = os.path.join(CONFIG_DIR, "widget_theme.json")
+# Path to Orbit Config, token storage and Gravity URL resolution are shared
+# with the CLI and the VFS via orbit/config.py (which has no Tk dependency).
+try:
+    from .config import (
+        BINARY_EXTENSIONS,
+        CONFIG_DIR,
+        CONFIG_FILE,
+        THEME_FILE,
+        gravity_api_url,
+        load_orbit_config as _shared_load_orbit_config,
+        save_orbit_config as _shared_save_orbit_config,
+    )
+except ImportError:  # running widget.py as a loose script
+    from config import (  # ty: ignore[unresolved-import]
+        BINARY_EXTENSIONS,
+        CONFIG_DIR,
+        CONFIG_FILE,
+        THEME_FILE,
+        gravity_api_url,
+        load_orbit_config as _shared_load_orbit_config,
+        save_orbit_config as _shared_save_orbit_config,
+    )
 
 ACTIVE_WIDGET_INSTANCE = None
 
@@ -146,22 +164,8 @@ ALLOWED_EXTENSIONS = {
     ".bin",
 }
 
-BINARY_EXTENSIONS = {
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".pdf",
-    ".docx",
-    ".xlsx",
-    ".pptx",
-    ".zip",
-    ".tar",
-    ".gz",
-    ".db",
-    ".sqlite",
-    ".bin",
-}
+# BINARY_EXTENSIONS is defined in orbit/config.py and imported above so the
+# widget and the VFS never disagree on which files are binary.
 
 
 class OrbitHTTPRequestHandler(BaseHTTPRequestHandler):
@@ -264,51 +268,21 @@ def save_baseline_snapshot(snapshot: dict):
 
 
 def load_orbit_config() -> dict:
-    config = {}
-    if os.path.isfile(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                config = json.load(f)
-        except Exception:
-            pass
+    """Load ~/.orbit/config.json with the resolved Gravity token attached.
 
-    try:
-        import keyring
-
-        token = keyring.get_password("gravity", "token")
-        if token:
-            config["token"] = token
-    except Exception:
-        pass
-
-    return config
+    Delegates to orbit.config.load_orbit_config so the widget, the CLI and the
+    VFS resolve the token identically (ORBIT_TOKEN env, then OS keyring, then
+    the plaintext file).
+    """
+    return _shared_load_orbit_config()
 
 
 def save_orbit_config(data: dict):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    write_data = dict(data)
-    token = write_data.pop("token", None)
+    """Persist config; the token goes to the OS keyring (plaintext fallback).
 
-    if token is not None:
-        try:
-            import keyring
-
-            if token:
-                keyring.set_password("gravity", "token", token)
-            else:
-                try:
-                    keyring.delete_password("gravity", "token")
-                except Exception:
-                    pass
-        except Exception:
-            if token:
-                write_data["token"] = token
-
-    try:
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(write_data, f, indent=2)
-    except Exception:
-        pass
+    Delegates to orbit.config.save_orbit_config.
+    """
+    _shared_save_orbit_config(data)
 
 
 def load_todos() -> list:
@@ -1087,7 +1061,9 @@ class TokenStatusWidget:
                 import urllib.request
                 import uuid
 
-                url = f"{server}/gravity/v1/workspace/tokens?repo_name={repo_name}"
+                url = gravity_api_url(
+                    f"/v1/workspace/tokens?repo_name={repo_name}", config
+                )
                 trace_id = f"trace_{uuid.uuid4().hex}"
                 req = urllib.request.Request(
                     url,
@@ -1548,8 +1524,9 @@ class TokenStatusWidget:
             )
             return
 
-        # 2. Perform Handshake on Gravity via the reverse proxy (/gravity/v1/handshake)
-        handshake_url = f"{server}/gravity/v1/handshake"
+        # 2. Perform Handshake on Gravity via the reverse proxy (/gravity/v1/handshake
+        #    by default; see orbit.config.resolve_gravity_base_url for overrides)
+        handshake_url = gravity_api_url("/v1/handshake", {"server": server})
         device_id = f"{getpass.getuser()}_{socket.gethostname()}"
         handshake_payload = json.dumps(
             {"access_token": access_token, "device_id": device_id}
@@ -3172,7 +3149,7 @@ class TokenStatusWidget:
         import urllib.error
         import uuid
 
-        push_url = f"{server}/gravity/v1/workspace/push"
+        push_url = gravity_api_url("/v1/workspace/push", config)
         trace_id = f"trace_{uuid.uuid4().hex}"
         headers = {
             "Content-Type": "application/json",
@@ -3450,7 +3427,7 @@ class TokenStatusWidget:
         import urllib.request
         import urllib.error
 
-        push_url = f"{server}/gravity/v1/workspace/push"
+        push_url = gravity_api_url("/v1/workspace/push", config)
         import uuid
 
         trace_id = f"trace_{uuid.uuid4().hex}"
@@ -3613,7 +3590,9 @@ class TokenStatusWidget:
         import uuid
 
         for repo in repos_to_check:
-            url = f"{server}/gravity/v1/workspace/test-results?repo_name={repo}"
+            url = gravity_api_url(
+                f"/v1/workspace/test-results?repo_name={repo}", config
+            )
             trace_id = f"trace_{uuid.uuid4().hex}"
             req = urllib.request.Request(
                 url,
@@ -3705,7 +3684,7 @@ class TokenStatusWidget:
         import urllib.error
         import uuid
 
-        push_url = f"{server}/gravity/v1/workspace/push"
+        push_url = gravity_api_url("/v1/workspace/push", config)
         trace_id = f"trace_{uuid.uuid4().hex}"
         headers = {
             "Content-Type": "application/json",
@@ -4023,7 +4002,7 @@ class TokenStatusWidget:
         import urllib.request
         import json
 
-        url = f"{server}/gravity/v1/workspace/comments/reply"
+        url = gravity_api_url("/v1/workspace/comments/reply", config)
         payload = {
             "repo_name": repo_name,
             "comment_id": comment["id"] if comment.get("path") else None,
@@ -4059,7 +4038,7 @@ class TokenStatusWidget:
         import uuid
         import json
 
-        url = f"{server}/gravity/v1/workspace/comments?repo_name={repo_name}"
+        url = gravity_api_url(f"/v1/workspace/comments?repo_name={repo_name}", config)
         trace_id = f"trace_{uuid.uuid4().hex}"
         req = urllib.request.Request(
             url,

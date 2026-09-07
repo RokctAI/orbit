@@ -18,3 +18,42 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+
+"""Orbit -- OSS client daemon for Gravity."""
+
+import json as _json
+import os as _os
+
+# Distribution name as declared in pyproject.toml.
+DIST_NAME = "orbit-client"
+
+
+def _read_version() -> str:
+    """Return the package version.
+
+    ``version.json`` at the repository root is the single source of truth (it
+    is what the shared release pipeline bumps). ``pyproject.toml`` reads
+    ``orbit.__version__`` dynamically at build time, and the CLI's
+    ``--version`` reads it at run time. When running from an installed wheel
+    (no ``version.json`` on disk) the version recorded in the package
+    metadata at build time is used instead.
+    """
+    version_file = _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)), _os.pardir, "version.json"
+    )
+    try:
+        with open(version_file, "r", encoding="utf-8") as f:
+            value = _json.load(f).get("version")
+        if value:
+            return str(value)
+    except Exception:
+        pass
+    try:
+        from importlib.metadata import version as _dist_version
+
+        return _dist_version(DIST_NAME)
+    except Exception:
+        return "0.0.0"
+
+
+__version__ = _read_version()

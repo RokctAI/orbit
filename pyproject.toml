@@ -1,10 +1,12 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "orbit-client"
-version = "0.1.0"
+# Single source of truth is version.json at the repo root (bumped by the
+# shared release pipeline); orbit/__init__.py reads it into __version__.
+dynamic = ["version"]
 description = "OSS client daemon for Gravity — install, connect, edit in any IDE"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,9 +22,19 @@ dependencies = [
     "keyring>=24.0.0",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+]
 
 [project.scripts]
 orbit = "orbit.cli:cli"
 
+[tool.setuptools.dynamic]
+version = {attr = "orbit.__version__"}
+
 [tool.setuptools.packages.find]
 include = ["orbit*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

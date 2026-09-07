@@ -1,0 +1,38 @@
+name: Tests
+permissions:
+  contents: read
+
+# The shared universal-pipeline / universal-linter workflows do not run
+# pytest for project_type 'python', so the test suite runs here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package (editable) with test extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      - name: Smoke-test the console script headless
+        run: |
+          orbit --version
+          orbit status
+
+      - name: Run tests
+        run: python -m pytest -q
