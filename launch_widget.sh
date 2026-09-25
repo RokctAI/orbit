@@ -32,8 +32,7 @@ mkdir -p "$TARGET_DIR"
 
 if [ ! -f "$TARGET_DIR/pyproject.toml" ]; then
   echo "[INFO] Orbit codebase not detected. Cloning repository into $TARGET_DIR..."
-  git clone https://github.com/RokctAI/orbit.git "$TARGET_DIR"
-  if [ $? -ne 0 ]; then
+  if ! git clone https://github.com/RokctAI/orbit.git "$TARGET_DIR"; then
     echo "[ERROR] Failed to clone the repository."
     exit 1
   fi
@@ -58,8 +57,7 @@ fi
 # 4. Build Virtual Environment if missing
 if [ ! -d ".venv" ]; then
   echo "[INFO] Creating Python virtual environment..."
-  python3 -m venv .venv
-  if [ $? -ne 0 ]; then
+  if ! python3 -m venv .venv; then
     echo "[ERROR] Failed to create virtual environment."
     exit 1
   fi
@@ -69,8 +67,7 @@ fi
 if [ ! -f ".venv/installed.tag" ]; then
   echo "[INFO] Installing Orbit package and dependencies..."
   .venv/bin/python -m pip install --upgrade pip
-  .venv/bin/pip install -e .
-  if [ $? -ne 0 ]; then
+  if ! .venv/bin/pip install -e .; then
     echo "[ERROR] Installation failed."
     exit 1
   fi
