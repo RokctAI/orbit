@@ -3,6 +3,11 @@
 # Exit on error
 set -e
 
+# bash reads a running script from disk as it goes. Step 3.5 can
+# "git reset --hard" this very file (launchd runs it from the clone), and bash
+# would then continue in the NEW file at the OLD byte offset. Wrapping the body
+# in a function makes bash parse all of it before running any of it.
+main() {
 echo "========================================================"
 echo "  🛸 Orbit Client Daemon Widget Bootstrapper (macOS/Linux)"
 echo "========================================================"
@@ -103,3 +108,7 @@ fi
 echo "[INFO] Launching Orbit Floating Status Bar Widget..."
 nohup .venv/bin/python -m orbit.cli widget >/dev/null 2>&1 &
 echo "[SUCCESS] Widget launched successfully in the background and registered for auto-start."
+}
+
+main "$@"
+exit $?

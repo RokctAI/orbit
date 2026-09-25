@@ -4056,43 +4056,134 @@ class TokenStatusWidget:
             pass
 
 
-def run_widget():
-    # Single instance lock using a TCP socket
-    lock_port = 49999
+# Single-instance handoff: a new launch asks the running widget to exit over
+# this local port and takes the port over once it is free.
+LOCK_PORT = 49999
+# How long a new launch waits for the old widget to let go of the lock port.
+# The old widget only polls for EXIT every 500 ms on the Tk thread, and a
+# workspace scan on its worker thread holds the GIL, so a fixed short sleep is
+# not enough: a relaunch used to lose the race, quit silently, and leave the
+# user with no widget at all once the old one finished exiting.
+LOCK_HANDOFF_TIMEOUT = 10.0
+WIDGET_LOG_FILE = os.path.join(CONFIG_DIR, "widget.log")
 
-    # Try to connect to existing instance to tell it to shut down
+
+def _widget_log(message: str):
+    """Append one line to ~/.orbit/widget.log.
+
+    The widget runs under pythonw on Windows (no console), so anything that
+    stops it from starting is otherwise invisible. Best effort, never raises.
+    """
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(1.0)
-        s.connect(("127.0.0.1", lock_port))
-        s.sendall(b"EXIT")
-        s.close()
-        # Give the older instance a moment to exit
-        time.sleep(0.5)
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        try:
+            if os.path.getsize(WIDGET_LOG_FILE) > 256 * 1024:
+                os.replace(WIDGET_LOG_FILE, WIDGET_LOG_FILE + ".1")
+        except OSError:
+            pass
+        with open(WIDGET_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{os.getpid()}] {message}\n")
     except Exception:
         pass
 
-    # Now bind to the lock port as the primary instance
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+def _try_bind_lock(port: int):
+    """Bind the lock port, returning (socket, None) or (None, error)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        server_socket.bind(("127.0.0.1", lock_port))
-        server_socket.listen(1)
-        server_socket.setblocking(False)
-    except Exception:
-        # If port binding still fails, another instance is actively running and refusing to exit
-        sys.exit(0)
+        if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        sock.bind(("127.0.0.1", port))
+        sock.listen(1)
+        sock.setblocking(False)
+        return sock, None
+    except OSError as e:
+        sock.close()
+        return None, e
+
+
+def acquire_instance_lock(port: int = LOCK_PORT, timeout: float = LOCK_HANDOFF_TIMEOUT):
+    """Take over as the single running widget.
+
+    Returns the listening lock socket, or None when the widget should run
+    without the single-instance lock. Never refuses to start: a launch that
+    cannot get the lock still opens the widget, because a duplicate widget is
+    recoverable and a launch that silently does nothing is not.
+    """
+    asked_old_to_exit = False
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        s.connect(("127.0.0.1", port))
+        s.sendall(b"EXIT")
+        s.close()
+        asked_old_to_exit = True
+    except OSError:
+        pass
+
+    deadline = time.monotonic() + (timeout if asked_old_to_exit else 0)
+    while True:
+        sock, err = _try_bind_lock(port)
+        if sock is not None:
+            return sock
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.1)
+
+    if asked_old_to_exit:
+        _widget_log(
+            f"lock port {port} still held {timeout:.0f}s after asking the running "
+            f"widget to exit ({err}); starting without the single-instance lock"
+        )
+    else:
+        # Nothing answered on the port but it cannot be bound: on Windows the
+        # port can sit in a Hyper-V/WSL excluded range or be in use as an
+        # ephemeral port (49999 is inside Windows' dynamic range).
+        _widget_log(
+            f"lock port {port} is unavailable ({err}); starting without the "
+            "single-instance lock"
+        )
+    return None
+
+
+def run_widget():
+    _widget_log("starting")
+    server_socket = acquire_instance_lock()
 
     root = tk.Tk()
-    app = TokenStatusWidget(root)
+
+    def report_callback_exception(exc, val, tb):
+        import traceback
+
+        _widget_log(
+            "unhandled Tk callback error:\n"
+            + "".join(traceback.format_exception(exc, val, tb))
+        )
+
+    root.report_callback_exception = report_callback_exception
+
+    try:
+        TokenStatusWidget(root)
+    except Exception:
+        import traceback
+
+        _widget_log("failed to build the widget:\n" + traceback.format_exc())
+        if server_socket is not None:
+            server_socket.close()
+        raise
 
     # Listen for shutdown signals on the lock port
     def check_instance_socket():
         try:
             conn, addr = server_socket.accept()
+            # The accepted socket may inherit non-blocking mode (Windows);
+            # a recv that raced the sender's write would then drop the EXIT.
+            conn.settimeout(1.0)
             msg = conn.recv(1024)
             if b"EXIT" in msg:
                 conn.close()
                 server_socket.close()
+                _widget_log("exiting: a newer launch took over")
                 root.destroy()
                 return
             conn.close()
@@ -4100,17 +4191,19 @@ def run_widget():
             pass
         except Exception:
             pass
-        root.after(500, check_instance_socket)
+        root.after(200, check_instance_socket)
 
-    root.after(500, check_instance_socket)
+    if server_socket is not None:
+        root.after(200, check_instance_socket)
 
     try:
         root.mainloop()
     finally:
-        try:
-            server_socket.close()
-        except Exception:
-            pass
+        if server_socket is not None:
+            try:
+                server_socket.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

@@ -1,6 +1,19 @@
 @echo off
 setlocal enabledelayedexpansion
 
+:: cmd reads a running .bat from disk line by line. Step 3.5 can
+:: "git reset --hard" this very file (auto-start runs it from the clone), and
+:: cmd would then keep reading the NEW file at the OLD byte offset and run
+:: half-lines. Run from a private copy in %TEMP% so an update cannot pull the
+:: script out from under itself. Invoking a .bat without "call" hands control
+:: over for good, so nothing below this block is read from the original.
+if /i not "%~1"=="--orbit-running-copy" (
+    copy /y "%~f0" "%TEMP%\orbit_launch_widget.bat" >nul 2>&1
+    if exist "%TEMP%\orbit_launch_widget.bat" (
+        "%TEMP%\orbit_launch_widget.bat" --orbit-running-copy
+    )
+)
+
 echo ========================================================
 echo   🛸 Orbit Client Daemon Widget Bootstrapper
 echo ========================================================
