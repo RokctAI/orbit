@@ -359,6 +359,76 @@ def status():
     click.echo("")
 
 
+# How long `orbit pr` waits for Gravity.
+PR_TIMEOUT_SECONDS = 60
+
+
+@cli.command()
+@click.argument("repo")
+@click.option("--intent", default=None, help="What the change is for, in a line or two.")
+@click.option("--title", default="", help="PR title (defaults to the intent's first line).")
+@click.option("--yes", is_flag=True, help="Open the PR without asking to confirm the intent.")
+def pr(repo, intent, title, yes):
+    """Open a pull request for your changes to REPO, led by its intent.
+
+    Orbit drafts the intent from your commit messages; you confirm or edit
+    it. Reviewers check the PR against that line, so say what the change is
+    for, not which files it touches.
+    """
+    from orbit.vfs import gravity_api_request
+
+    config = _load_orbit_config()
+    if not _resolve_gravity_base_url(config):
+        click.echo("Not connected. Run 'orbit login' first.", err=True)
+        sys.exit(1)
+
+    if intent is None:
+        draft, err = gravity_api_request(
+            "GET",
+            "/v1/workspace/pr-draft",
+            params={"repo_name": repo},
+            config=config,
+            timeout=PR_TIMEOUT_SECONDS,
+        )
+        if err:
+            click.echo(f"❌ Could not read your changes to {repo}: {err}", err=True)
+            sys.exit(1)
+        commits = draft.get("commits") or []
+        if not commits:
+            click.echo(f"Nothing to open: your branch of {repo} has no new commits.")
+            return
+        click.echo(f"\nYour commits on {repo}:")
+        for c in reversed(commits):
+            click.echo(f"   - {c.get('subject', '')}")
+        drafted = draft.get("intent", "")
+        if yes:
+            intent = drafted
+        else:
+            intent = click.prompt(
+                "\nIntent (what is this change for?)", default=drafted or None
+            )
+    intent = (intent or "").strip()
+    if not intent:
+        click.echo("❌ A PR needs an intent line.", err=True)
+        sys.exit(1)
+    if not yes and not click.confirm(f"Open the PR with intent: {intent!r}?", default=True):
+        click.echo("Cancelled.")
+        return
+
+    res, err = gravity_api_request(
+        "POST",
+        "/v1/workspace/open-pr",
+        data={"repo_name": repo, "intent": intent, "title": title},
+        config=config,
+        timeout=PR_TIMEOUT_SECONDS,
+    )
+    if err:
+        click.echo(f"❌ Gravity could not open the PR: {err}", err=True)
+        sys.exit(1)
+    for name, result in (res.get("pr_results") or {}).items():
+        click.echo(f"   {name}: {result}")
+
+
 TK_INSTALL_HINTS = (
     "   Debian/Ubuntu: sudo apt install python3-tk",
     "   Fedora:        sudo dnf install python3-tkinter",
