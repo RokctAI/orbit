@@ -18,6 +18,7 @@ on servers and CI runners without tkinter.
 orbit login          # Authenticate with Gravity server
 orbit mount          # Serve the Gravity workspace over WebDAV and mount it
 orbit status         # Show connection and sync state
+orbit pr <repo>      # Open a PR for your changes, led by an intent line you confirm
 orbit widget         # Launch the floating minimal status bar
 orbit --version      # Version comes from version.json (single source of truth)
 ```
