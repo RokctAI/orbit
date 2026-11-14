@@ -18,7 +18,10 @@ def gravity(monkeypatch, isolated_config):
         "draft": {
             "status": True,
             "intent": "fix: typo; docs: add install step",
-            "commits": [{"subject": "docs: add install step"}, {"subject": "fix: typo"}],
+            "commits": [
+                {"subject": "docs: add install step"},
+                {"subject": "fix: typo"},
+            ],
         }
     }
 
@@ -27,7 +30,10 @@ def gravity(monkeypatch, isolated_config):
         if endpoint == "/v1/workspace/pr-draft":
             return state["draft"], None
         if endpoint == "/v1/workspace/open-pr":
-            return {"status": True, "pr_results": {"plain": "https://github.com/x/plain/pull/1"}}, None
+            return {
+                "status": True,
+                "pr_results": {"plain": "https://github.com/x/plain/pull/1"},
+            }, None
         raise AssertionError(endpoint)
 
     monkeypatch.setattr(vfs, "gravity_api_request", fake)
@@ -49,7 +55,13 @@ def test_user_confirms_the_drafted_intent(gravity):
     result = run(["pr", "plain"], input="\ny\n")
     assert result.exit_code == 0, result.output
     assert "- fix: typo" in result.output
-    assert opened(calls) == [{"repo_name": "plain", "intent": "fix: typo; docs: add install step", "title": ""}]
+    assert opened(calls) == [
+        {
+            "repo_name": "plain",
+            "intent": "fix: typo; docs: add install step",
+            "title": "",
+        }
+    ]
     assert "pull/1" in result.output
 
 
