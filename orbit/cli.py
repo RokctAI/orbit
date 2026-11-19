@@ -365,9 +365,15 @@ PR_TIMEOUT_SECONDS = 60
 
 @cli.command()
 @click.argument("repo")
-@click.option("--intent", default=None, help="What the change is for, in a line or two.")
-@click.option("--title", default="", help="PR title (defaults to the intent's first line).")
-@click.option("--yes", is_flag=True, help="Open the PR without asking to confirm the intent.")
+@click.option(
+    "--intent", default=None, help="What the change is for, in a line or two."
+)
+@click.option(
+    "--title", default="", help="PR title (defaults to the intent's first line)."
+)
+@click.option(
+    "--yes", is_flag=True, help="Open the PR without asking to confirm the intent."
+)
 def pr(repo, intent, title, yes):
     """Open a pull request for your changes to REPO, led by its intent.
 
@@ -411,7 +417,9 @@ def pr(repo, intent, title, yes):
     if not intent:
         click.echo("❌ A PR needs an intent line.", err=True)
         sys.exit(1)
-    if not yes and not click.confirm(f"Open the PR with intent: {intent!r}?", default=True):
+    if not yes and not click.confirm(
+        f"Open the PR with intent: {intent!r}?", default=True
+    ):
         click.echo("Cancelled.")
         return
 
